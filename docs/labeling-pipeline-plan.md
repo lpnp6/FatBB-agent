@@ -44,7 +44,7 @@ Output: `data/preprocessor_report.json`
 
 ### DedupStore: Persistent Content-Level De-duplication
 
-Content-level duplicates survive the preprocessor (same recipe, different file variant). A persistent `DedupStore` module prevents them from ever reaching the API:
+Content-level duplicates survive the preprocessor (same content, different filenames). A persistent `DedupStore` module prevents them from ever reaching the API:
 
 | Duplicate scenario | Example | Detection method |
 |---|---|---|
@@ -57,29 +57,45 @@ Content-level duplicates survive the preprocessor (same recipe, different file v
 Like `LabelingClient`, `DedupStore` follows **dependency inversion**: the orchestrator imports only the abstract interface. The concrete backend (SQLite, in-memory, Redis, etc.) is injected at the composition root.
 
 ```python
-# src/labeling/interfaces.py
+# src/labeling/interfaces/dedup_store.py
 
 class DedupStore(ABC):
-    """Abstract persistent key-value store for recipe-card hashes.
-    
+    """Persistent store of recipe-card content hashes with lifecycle tracking.
+
     Survives process restarts. Used in sampling (dedup initial corpus)
     and during auto-labeling (block already-labeled recipes). The
     orchestrator imports ONLY this interface.
     """
 
     @abstractmethod
-    def is_duplicate(self, recipe_card_hash: str) -> bool:
-        """Check if hash already exists. O(1), no API call needed."""
+    def lookup(self, recipe_card_hash: str) -> HashStatus | None:
+        """Return current hash status, or None if unknown."""
         ...
 
     @abstractmethod
-    def register(self, recipe_card_hash: str, source_file: str, variant: str) -> None:
-        """Persist hash after accepting a file for labeling."""
+    def register(self, recipe_card_hash: str, source_file: str,
+                 status: HashStatus) -> None:
+        """Persist hash with its initial lifecycle status."""
+        ...
+
+    @abstractmethod
+    def update_status(self, recipe_card_hash: str, status: HashStatus) -> None:
+        """Transition hash to a new status."""
+        ...
+
+    @abstractmethod
+    def expire_stale(self, timeout_minutes: int) -> int:
+        """Remove IN_FLIGHT entries older than timeout."""
+        ...
+
+    @abstractmethod
+    def clear_in_flight_by_slugs(self, slugs: set[str]) -> None:
+        """Remove IN_FLIGHT entries by source file slugs (crash recovery)."""
         ...
 
     @abstractmethod
     def recipe_card_hash(self, markdown: str) -> str:
-        """SHA-256 of Ingredients + Instructions blocks, whitespace-normalized."""
+        """Compute a stable fingerprint of the recipe card."""
         ...
 ```
 
@@ -95,7 +111,7 @@ class SQLiteDedupStore(DedupStore):
             "CREATE TABLE IF NOT EXISTS hashes ("
             "  hash TEXT PRIMARY KEY,"
             "  source_file TEXT,"
-            "  variant TEXT,  -- 'wprm_print' | 'full_page'"
+            "  status TEXT NOT NULL DEFAULT 'in_flight',"
             "  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
             ")"
         )
@@ -244,7 +260,7 @@ OpenAILabelingClient    LocalModelLabelingClient
                     DedupStore (abstract)
                     |
                     |  is_duplicate(hash) -> bool
-                    |  register(hash, file, variant)
+                    |  register(hash, file, status)
                     |  recipe_card_hash(md) -> str
                     |
         +-----------+-----------+
