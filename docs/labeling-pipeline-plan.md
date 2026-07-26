@@ -132,8 +132,11 @@ class MemoryDedupStore(DedupStore):
 
 | Implementation | Backend | Use Case |
 |---|---|---|
-| `SQLiteDedupStore` | SQLite file | Production — survives restarts |
+| `SQLiteDedupStore` | SQLite, exact hash | Production — byte-identical duplicates |
+| `SimHashDedupStore` | SQLite + SimHash + Manku block index | Production — near-duplicates (same recipe, minor edits) |
 | `MemoryDedupStore` | `set[str]` in memory | Unit tests — fast, disposable |
+
+**SimHashDedupStore** uses a 64-bit SimHash fingerprint + Hamming distance threshold (default 3, ~95%+ similarity). The 64-bit hash is partitioned into 4 blocks of 16 bits (threshold + 1). By the pigeonhole principle, two hashes within distance 3 MUST share at least one identical block. This enables O(1) candidate lookup via a `(block_id, block_value)` index instead of an O(n) full-table scan. Average bucket size = N / 65536 rows; at 100k entries, ~1.5 candidates per lookup.
 
 **Storage**: SQLite file at `data/dedup_store.db`. Lightweight (~1KB per 1000 entries). The same store is used during bootstrap labeling AND production auto-labeling — preventing both duplicate API costs and duplicate training data.
 
@@ -263,12 +266,12 @@ OpenAILabelingClient    LocalModelLabelingClient
                     |  register(hash, file, status)
                     |  recipe_card_hash(md) -> str
                     |
-        +-----------+-----------+
-        |                       |
-  SQLiteDedupStore        MemoryDedupStore
-        |                       |
-     SQLite file            set[str]
-   (production)            (testing)
+        +-------------+-------------+
+        |             |             |
+  SQLiteDedupStore  SimHashDedupStore  MemoryDedupStore
+        |             |             |
+     SQLite file    SQLite + Manku   set[str]
+   (exact match)   (fuzzy match)    (testing)
 ```
 
 ### Interface Definition
@@ -403,7 +406,8 @@ src/labeling/
 │
 ├── dedup/                      # Content-hash dedup subpackage
 │   ├── __init__.py
-│   ├── sqlite_store.py         #   SQLiteDedupStore : DedupStore  (persistent)
+│   ├── sqlite_store.py         #   SQLiteDedupStore : DedupStore  (exact hash)
+│   ├── simhash_store.py        #   SimHashDedupStore : DedupStore (fuzzy, block-indexed)
 │   └── memory_store.py         #   MemoryDedupStore : DedupStore  (testing)
 │
 ├── clients/                    # Labeling backend subpackage
@@ -448,6 +452,7 @@ interfaces.py
     +-- DedupStore (abstract)            # SQLite vs in-memory
     |       |
     |       +-- SQLiteDedupStore         (dedup/sqlite_store.py)
+    |       +-- SimHashDedupStore        (dedup/simhash_store.py)
     |       +-- MemoryDedupStore         (dedup/memory_store.py)
     |
     +-- PromptBuilder (abstract)         # prompt assembly strategy
