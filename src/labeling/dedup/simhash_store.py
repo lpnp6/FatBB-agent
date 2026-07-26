@@ -131,12 +131,25 @@ class SimHashDedupStore(DedupStore):
         source_file: str,
         status: HashStatus,
     ) -> None:
+        """Persist a hash with its initial status.
+
+        Writes to two tables in one transaction:
+            1. simhashes: one row — the authoritative record (hash, file, status).
+            2. simhash_index: T+1 rows — one per 16-bit block of the 64-bit
+               SimHash. This is the Manku block index that enables O(1)
+               candidate lookup instead of full-table scan.
+
+        INSERT OR REPLACE on simhashes ensures re-registering the same hash
+        (e.g. after expire_stale cleanup) overwrites the old status.
+        INSERT OR IGNORE on simhash_index avoids duplicate index rows —
+        the same (block_id, block_value, hash) tuple may already exist
+        if the hash was previously registered and expired/recovered.
+        """
         self._db.execute(
             "INSERT OR REPLACE INTO simhashes (hash, source_file, status) "
             "VALUES (?, ?, ?)",
             (recipe_card_hash, source_file, status.value),
         )
-        # Insert T+1 index rows
         for block_id, block_value in enumerate(self._hash_blocks(recipe_card_hash)):
             self._db.execute(
                 "INSERT OR IGNORE INTO simhash_index (block_id, block_value, hash) "
@@ -241,6 +254,15 @@ class SimHashDedupStore(DedupStore):
 
     @staticmethod
     def _normalize(text: str) -> str:
+        """Strip noise that varies between duplicates of the same recipe.
+
+        Removed before tokenization so these superficial differences
+        don't affect the SimHash fingerprint:
+            - URLs: CDN paths, tracking params, different site mirrors
+            - Dates: publish/update timestamps differ, body is identical
+            - Markdown formatting tokens: `` ` `` `*` `_` `>` `#` `[]` `()`
+              differ between trafilatura / html2text / wprm_print output
+        """
         text = text.lower()
         text = re.sub(r"https?://\S+", " ", text)
         text = re.sub(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}", " ", text)
@@ -250,6 +272,19 @@ class SimHashDedupStore(DedupStore):
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
+        """Split normalized text into meaningful content-bearing tokens.
+
+        Token rules:
+            - 2+ characters only: single-char tokens (punctuation, CJK
+              particles like 的/了/は) are noise — they vote weakly and
+              inconsistently, so we drop them.
+            - \\w: ASCII word characters (ingredient, recipe, sauté, …)
+            - ぀-ヿ: Japanese Hiragana + Katakana (レシピ, 調理, …)
+            - 一-鿿: CJK Unified Ideographs (食材, 烹饪, 炒, …)
+
+        Returns:
+            Token list to be hashed for fingerprint building.
+        """
         return re.findall(r"[\w぀-ヿ一-鿿]{2,}", text)
 
     def _build_fingerprint(self, tokens: list[str]) -> str:
