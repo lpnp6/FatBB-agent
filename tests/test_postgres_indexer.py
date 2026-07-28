@@ -11,8 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from rag.chunkers import MarkdownChunker
 from rag.indexers import BM25Indexer
-from rag.interfaces import BM25SearchStore, ScoredTextChunk
-from rag.models import Document, SourceRef, TextChunk
+from rag.interfaces import BM25SearchStore
+from rag.models import Document, ScoredTextChunk, SourceRef, TextChunk
 
 
 class RecordingBM25Store(BM25SearchStore):

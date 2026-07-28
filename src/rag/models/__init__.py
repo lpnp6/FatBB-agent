@@ -1,7 +1,7 @@
 """RAG domain models."""
 
 from .common import Metadata, SourceRef
-from .document import Document, TextChunk
+from .document import Document, ScoredTextChunk, TextChunk
 from .evidence import Evidence, EvidenceKind
 from .query import RetrievalMode, RetrievalQuery
 
@@ -12,6 +12,7 @@ __all__ = [
     "Metadata",
     "RetrievalMode",
     "RetrievalQuery",
+    "ScoredTextChunk",
     "SourceRef",
     "TextChunk",
 ]

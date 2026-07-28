@@ -6,9 +6,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 import json
 
-from ..interfaces.stores import BM25SearchStore, ScoredTextChunk
+from ..interfaces.stores import BM25SearchStore
 from ..models.common import SourceRef
-from ..models.document import TextChunk
+from ..models.document import ScoredTextChunk, TextChunk
 
 
 class PostgresTextChunkStore(BM25SearchStore):

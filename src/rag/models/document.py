@@ -29,3 +29,11 @@ class TextChunk:
     start_offset: int | None = None
     end_offset: int | None = None
     metadata: Metadata = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ScoredTextChunk:
+    """A text chunk and the relevance score computed by a search backend."""
+
+    chunk: TextChunk
+    score: float

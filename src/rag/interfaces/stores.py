@@ -4,17 +4,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 
-from ..models.document import TextChunk
-
-
-@dataclass(frozen=True)
-class ScoredTextChunk:
-    """A text chunk and the relevance score computed by a search backend."""
-
-    chunk: TextChunk
-    score: float
+from ..models.document import ScoredTextChunk, TextChunk
 
 
 class TextChunkStore(ABC):

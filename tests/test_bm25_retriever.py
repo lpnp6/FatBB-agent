@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from rag.interfaces.stores import BM25SearchStore, ScoredTextChunk
-from rag.models import Evidence, RetrievalQuery, SourceRef, TextChunk
+from rag.interfaces.stores import BM25SearchStore
+from rag.models import Evidence, RetrievalQuery, ScoredTextChunk, SourceRef, TextChunk
 from rag.retrievers import BM25Retriever
 from rag.stores import PostgresTextChunkStore
 
