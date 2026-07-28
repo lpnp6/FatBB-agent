@@ -73,6 +73,52 @@ class PostgresTextChunkStore(BM25SearchStore):
     def upsert_chunks(self, chunks: Sequence[TextChunk]) -> None:
         if not chunks:
             return
+        with self._connect() as connection, connection.cursor() as cursor:
+            self._upsert_chunks(cursor, chunks)
+
+    def delete_chunks(self, chunk_ids: Sequence[str]) -> None:
+        if not chunk_ids:
+            return
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("DELETE FROM rag_text_chunks WHERE id = ANY(%s)", (list(chunk_ids),))
+
+    def replace_document_chunks(
+        self, document_id: str, chunks: Sequence[TextChunk]
+    ) -> None:
+        """Replace one document's chunks in one transaction.
+
+        Existing IDs are preserved until replacement rows have been prepared;
+        rows no longer emitted by the chunker are removed before commit.
+        """
+        if any(chunk.document_id != document_id for chunk in chunks):
+            raise ValueError("every replacement chunk must belong to document_id")
+
+        with self._connect() as connection, connection.cursor() as cursor:
+            if chunks:
+                cursor.execute(
+                    "DELETE FROM rag_text_chunks "
+                    "WHERE document_id = %s AND NOT (id = ANY(%s))",
+                    (document_id, [chunk.id for chunk in chunks]),
+                )
+                self._upsert_chunks(cursor, chunks)
+            else:
+                cursor.execute(
+                    "DELETE FROM rag_text_chunks WHERE document_id = %s", (document_id,)
+                )
+
+    def delete_by_document_ids(self, document_ids: Sequence[str]) -> None:
+        """Remove all chunk rows associated with deleted source documents."""
+        if not document_ids:
+            return
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM rag_text_chunks WHERE document_id = ANY(%s)",
+                (list(document_ids),),
+            )
+
+    @staticmethod
+    def _upsert_chunks(cursor: object, chunks: Sequence[TextChunk]) -> None:
+        """Execute the shared chunk upsert statement using an open cursor."""
         query = """
             INSERT INTO rag_text_chunks (
                 id, document_id, content, chunk_index, source, start_offset,
@@ -100,14 +146,9 @@ class PostgresTextChunkStore(BM25SearchStore):
             )
             for chunk in chunks
         ]
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.executemany(query, values)
-
-    def delete_chunks(self, chunk_ids: Sequence[str]) -> None:
-        if not chunk_ids:
-            return
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute("DELETE FROM rag_text_chunks WHERE id = ANY(%s)", (list(chunk_ids),))
+        # psycopg's cursor type is intentionally kept out of this module's
+        # import surface so pure domain tests do not require the driver.
+        cursor.executemany(query, values)  # type: ignore[attr-defined]
 
     def _connect(self):
         try:

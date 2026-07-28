@@ -41,7 +41,7 @@ src/rag/
 │   ├── fixed_size_chunker.py
 │   └── markdown_chunker.py
 ├── indexers/
-│   └── postgres_indexer.py
+│   └── bm25_indexer.py
 ├── stores/
 │   ├── memory_store.py
 │   ├── chroma_store.py
@@ -299,7 +299,7 @@ class Chunker(ABC):
 - `id` 对同一文档版本和相同切分结果稳定，例如基于 `document.id`、`index` 和 content digest 生成；
 - `metadata` 继承文档 metadata，并可增加 `chunker`、`chunk_version` 等索引元数据。
 
-`Indexer` 编排切分和持久化。它不计算 BM25：将 chunk 写入 PostgreSQL 后，`pg_search` 自动维护 `USING bm25` 索引。
+`Indexer` 编排切分和持久化。它不计算 BM25：将 chunk 写入 BM25 存储后，由具体后端自动维护索引。
 
 ```python
 class Indexer(ABC):
@@ -310,13 +310,13 @@ class Indexer(ABC):
     def delete_documents(self, document_ids: Sequence[str]) -> None: ...
 ```
 
-第一阶段的 `PostgresIndexer` 注入 `Chunker` 与 `TextChunkStore`，执行：
+第一阶段的 `BM25Indexer` 注入 `Chunker` 与 `BM25SearchStore`，执行：
 
 ```text
-Document -> Chunker.chunk() -> list[TextChunk] -> TextChunkStore.upsert_chunks()
+Document -> Chunker.chunk() -> list[TextChunk] -> BM25SearchStore.replace_document_chunks()
 ```
 
-重建同一文档时，Indexer 应先删除该文档不再产生的旧 chunk，再 upsert 新 chunk，避免过期内容继续被召回。为此 `TextChunkStore` 后续需要补充 `delete_by_document_ids()`；在该能力落地前，不应将“完整重建”宣称为已支持。
+重建同一文档时，Indexer 通过 `TextChunkStore.replace_document_chunks()` 在一个存储事务中删除该文档不再产生的旧 chunk 并 upsert 新 chunk，避免过期内容继续被召回。删除原始文档时，Indexer 调用 `delete_by_document_ids()` 清理其全部索引表示。
 
 向量 Indexer 可在文本切分后调用 EmbeddingProvider 和 VectorStore；图 Indexer 可抽取实体关系后调用 GraphStore。写接口保持在各自的存储端口，不放进 `Retriever`。
 
@@ -356,7 +356,7 @@ psql "$DATABASE_URL" -f migrations/postgres/0001_create_rag_text_chunks.sql
 
 `BM25Retriever` 不再包含分词、TF/DF 统计或 BM25 公式；它只校验非空查询、调用 `search_bm25()`，再将 `ScoredTextChunk` 包装为 `Evidence`。若未来替换搜索引擎，只需实现相同的 `BM25SearchStore` 端口，不影响 `Retriever`、`Evidence` 或业务调用代码。
 
-要打通第一版 BM25，必须由 `PostgresIndexer` 将至少一个 `Document` 写入 `rag_text_chunks`。没有入库 chunk 时，pg_search 查询会正确但始终返回空结果。
+要打通第一版 BM25，必须由 `BM25Indexer` 将至少一个 `Document` 写入 BM25 存储。没有入库 chunk 时，pg_search 查询会正确但始终返回空结果。
 
 ### 6.3 GraphRetriever
 
@@ -409,7 +409,7 @@ score(evidence) = Σ 1 / (k + rank_i)
 索引流程独立运行：
 
 ```text
-原始资料 -> Document -> PostgresIndexer
+原始资料 -> Document -> BM25Indexer
                        -> Chunker -> TextChunk -> upsert_chunks()
                        -> PostgreSQL rag_text_chunks
                        -> pg_search 自动维护 BM25 索引
@@ -437,7 +437,7 @@ Retriever 契约测试：
 实现测试：
 
 - `Chunker`：分块顺序、最大长度、overlap、标题边界、稳定 ID 与 source/metadata 继承；
-- `PostgresIndexer`：`Document -> TextChunk -> upsert_chunks()` 调用、空文档行为、重复导入幂等性和重建时旧 chunk 清理；
+- `BM25Indexer`：`Document -> TextChunk -> replace_document_chunks()` 调用、空文档行为、重复导入幂等性和重建时旧 chunk 清理；
 - `PostgresTextChunkStore`：迁移后的 upsert、JSONB filter、pg_search score 和 `top_k` 查询（集成测试）；
 - `MemoryRetriever`：关键词匹配、筛选、排序；
 - `HybridRetriever`：RRF 融合、跨来源去重、部分检索器无结果；
@@ -453,7 +453,7 @@ Retriever 契约测试：
 ## 11. 实施顺序
 
 1. 创建模型、`Retriever`、`TextChunkStore`、`BM25Retriever` 与 PostgreSQL 适配器，完成契约测试；
-2. 实现 `Chunker`、`Indexer` 和 `PostgresIndexer`，打通 `Document -> pg_search` 入库链路；
+2. 实现 `Chunker`、`Indexer` 和 `BM25Indexer`，打通 `Document -> pg_search` 入库链路；
 3. 实现 `ContextBuilder`，让上层服务可将 BM25 证据注入提示词；
 4. 接入一个向量库适配器和 Embedding 适配器，完成 `VectorRetriever`；
 5. 接入图数据库适配器和 `GraphRetriever`；

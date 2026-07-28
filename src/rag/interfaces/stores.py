@@ -32,6 +32,16 @@ class TextChunkStore(ABC):
     def delete_chunks(self, chunk_ids: Sequence[str]) -> None:
         """Delete chunks by ID; unknown IDs are ignored."""
 
+    @abstractmethod
+    def replace_document_chunks(
+        self, document_id: str, chunks: Sequence[TextChunk]
+    ) -> None:
+        """Atomically replace all chunks belonging to one document."""
+
+    @abstractmethod
+    def delete_by_document_ids(self, document_ids: Sequence[str]) -> None:
+        """Delete every chunk belonging to the supplied document IDs."""
+
 
 class BM25SearchStore(TextChunkStore):
     """A store capable of executing BM25 search in its native backend."""
