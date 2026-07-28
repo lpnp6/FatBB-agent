@@ -34,8 +34,14 @@ src/rag/
 │   ├── retriever.py       # 统一只读检索接口
 │   ├── stores.py          # 文本、向量、图存储端口
 │   ├── embedding.py       # 向量化端口
-│   ├── indexer.py         # 可选：知识写入/删除/重建接口
+│   ├── chunker.py         # Document 到 TextChunk 的切分端口
+│   ├── indexer.py         # 知识写入/删除/重建接口
 │   └── reranker.py        # 可选：重排接口
+├── chunkers/
+│   ├── fixed_size_chunker.py
+│   └── markdown_chunker.py
+├── indexers/
+│   └── postgres_indexer.py
 ├── stores/
 │   ├── memory_store.py
 │   ├── chroma_store.py
@@ -51,7 +57,7 @@ src/rag/
 └── service.py             # 可选的 RAG 编排服务
 ```
 
-第一阶段实现 `models/`、存储端口、`Retriever`、`BM25Retriever` 与 `PostgresTextChunkStore`。PostgreSQL 的 `pg_search` 在数据库内完成 BM25 评分、排序和 `top_k` 截断；`BM25Retriever` 只负责将结果转换为统一 `Evidence`。外部向量库和图数据库适配器保持为后续迭代。
+第一阶段实现 `models/`、存储端口、`Chunker`、`Indexer`、`BM25Retriever` 与 `PostgresTextChunkStore`。PostgreSQL 的 `pg_search` 在数据库内完成 BM25 评分、排序和 `top_k` 截断；`BM25Retriever` 只负责将结果转换为统一 `Evidence`。外部向量库和图数据库适配器保持为后续迭代。
 
 其中 `retrievers/` 不能直接 import 某个数据库 SDK。存储实现集中在 `stores/`，由应用装配层注入对应的接口实现。
 
@@ -269,7 +275,31 @@ class HealthCheckable(Protocol):
 
 这样既能替换底层数据库，也不会损失图查询的表达力。
 
-### 5.3 可选 Indexer
+### 5.3 Chunker 与 Indexer
+
+`Chunker` 只负责将一个 `Document` 转换为顺序稳定、可追溯的 `TextChunk`；它不连接数据库，也不生成 Embedding。
+
+```python
+class Chunker(ABC):
+    @abstractmethod
+    def chunk(self, document: Document) -> list[TextChunk]:
+        """Split one document into ordered, citeable text chunks."""
+```
+
+第一版提供两种实现：
+
+- `FixedSizeChunker`：按字符或 token 上限并保留 overlap，适合纯文本；
+- `MarkdownChunker`：优先按标题分段，再对超长段落切分，适合 Markdown 知识库。
+
+每个 `TextChunk` 必须满足：
+
+- `document_id == document.id`；
+- `index` 从 0 连续递增；
+- `source` 保留原始 URI、标题和定位信息；
+- `id` 对同一文档版本和相同切分结果稳定，例如基于 `document.id`、`index` 和 content digest 生成；
+- `metadata` 继承文档 metadata，并可增加 `chunker`、`chunk_version` 等索引元数据。
+
+`Indexer` 编排切分和持久化。它不计算 BM25：将 chunk 写入 PostgreSQL 后，`pg_search` 自动维护 `USING bm25` 索引。
 
 ```python
 class Indexer(ABC):
@@ -280,7 +310,15 @@ class Indexer(ABC):
     def delete_documents(self, document_ids: Sequence[str]) -> None: ...
 ```
 
-文本实现内部可执行分块和向量化，再调用 `VectorStore` 写入；图实现内部可抽取实体关系，再调用 `GraphStore` 写入。写接口可依照实际存储能力定义为 `upsert_chunks`、`upsert_nodes`、`upsert_edges`，不必为了统一而放进 `Retriever`。
+第一阶段的 `PostgresIndexer` 注入 `Chunker` 与 `TextChunkStore`，执行：
+
+```text
+Document -> Chunker.chunk() -> list[TextChunk] -> TextChunkStore.upsert_chunks()
+```
+
+重建同一文档时，Indexer 应先删除该文档不再产生的旧 chunk，再 upsert 新 chunk，避免过期内容继续被召回。为此 `TextChunkStore` 后续需要补充 `delete_by_document_ids()`；在该能力落地前，不应将“完整重建”宣称为已支持。
+
+向量 Indexer 可在文本切分后调用 EmbeddingProvider 和 VectorStore；图 Indexer 可抽取实体关系后调用 GraphStore。写接口保持在各自的存储端口，不放进 `Retriever`。
 
 ### 5.4 可选 Reranker
 
@@ -317,6 +355,8 @@ psql "$DATABASE_URL" -f migrations/postgres/0001_create_rag_text_chunks.sql
 应用运行时不得执行 DDL；`PostgresTextChunkStore` 仅执行 chunk 的读写和 BM25 查询。
 
 `BM25Retriever` 不再包含分词、TF/DF 统计或 BM25 公式；它只校验非空查询、调用 `search_bm25()`，再将 `ScoredTextChunk` 包装为 `Evidence`。若未来替换搜索引擎，只需实现相同的 `BM25SearchStore` 端口，不影响 `Retriever`、`Evidence` 或业务调用代码。
+
+要打通第一版 BM25，必须由 `PostgresIndexer` 将至少一个 `Document` 写入 `rag_text_chunks`。没有入库 chunk 时，pg_search 查询会正确但始终返回空结果。
 
 ### 6.3 GraphRetriever
 
@@ -369,9 +409,14 @@ score(evidence) = Σ 1 / (k + rank_i)
 索引流程独立运行：
 
 ```text
-原始资料 -> Document -> Indexer
-                    -> TextChunk -> 关键词 / 向量索引
-                    -> 实体关系 -> 图索引
+原始资料 -> Document -> PostgresIndexer
+                       -> Chunker -> TextChunk -> upsert_chunks()
+                       -> PostgreSQL rag_text_chunks
+                       -> pg_search 自动维护 BM25 索引
+
+用户问题 -> BM25Retriever -> PostgresTextChunkStore.search_bm25()
+                           -> pg_search top_k + score
+                           -> Evidence
 ```
 
 ## 9. 测试策略
@@ -391,6 +436,9 @@ Retriever 契约测试：
 
 实现测试：
 
+- `Chunker`：分块顺序、最大长度、overlap、标题边界、稳定 ID 与 source/metadata 继承；
+- `PostgresIndexer`：`Document -> TextChunk -> upsert_chunks()` 调用、空文档行为、重复导入幂等性和重建时旧 chunk 清理；
+- `PostgresTextChunkStore`：迁移后的 upsert、JSONB filter、pg_search score 和 `top_k` 查询（集成测试）；
 - `MemoryRetriever`：关键词匹配、筛选、排序；
 - `HybridRetriever`：RRF 融合、跨来源去重、部分检索器无结果；
 - `GraphRetriever`：最大跳数、关系类型限制、路径序列化；
@@ -405,9 +453,9 @@ Retriever 契约测试：
 ## 11. 实施顺序
 
 1. 创建模型、`Retriever`、`TextChunkStore`、`BM25Retriever` 与 PostgreSQL 适配器，完成契约测试；
-2. 实现 `ContextBuilder`，让上层服务可将 BM25 证据注入提示词；
-3. 接入一个向量库适配器和 Embedding 适配器，完成 `VectorRetriever`；
-4. 引入 `Indexer`，形成稳定的文本索引流水线；
+2. 实现 `Chunker`、`Indexer` 和 `PostgresIndexer`，打通 `Document -> pg_search` 入库链路；
+3. 实现 `ContextBuilder`，让上层服务可将 BM25 证据注入提示词；
+4. 接入一个向量库适配器和 Embedding 适配器，完成 `VectorRetriever`；
 5. 接入图数据库适配器和 `GraphRetriever`；
 6. 实现 `HybridRetriever` + RRF，再按质量需求加入重排器。
 
