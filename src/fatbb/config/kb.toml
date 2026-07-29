@@ -1,0 +1,12 @@
+# Stable knowledge-base type keys mapped to concrete adapter factories.
+# Registry owns this source-controlled configuration and imports lazily.
+
+[databases.pg]
+
+[knowledge_bases.bm25]
+# This factory is valid only for PostgreSQL-backed knowledge bases.
+database_type = "pg"
+factory = "fatbb.infrastructure.kb.bm25:PostgresBm25KnowledgeBase"
+
+[importers.file_path]
+factory = "fatbb.infrastructure.importer.local_files:LocalFileImporter"

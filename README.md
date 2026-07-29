@@ -41,22 +41,35 @@ pip install -e .
 
 export DATABASE_URL='postgresql://user:password@localhost:5432/fatbb'
 psql "$DATABASE_URL" -f migrations/postgres/0001_create_rag_text_chunks.sql
-psql "$DATABASE_URL" -f migrations/postgres/0002_create_knowledge_bases.sql
 ```
 
 The migration creates the `rag_text_chunks` table, metadata indexes, and the BM25 index. The application does not execute DDL at runtime.
 
 ## Interactive CLI
 
-After installing the project and applying both migrations, start a persistent terminal session:
+After installing the project and applying the RAG migration, start a persistent terminal session:
 
 ```bash
 fatbb
 ```
 
-The UI is entirely in English. Type `/` to open the command palette and select **Knowledge Base**. Press Backspace to delete `/` and return to the chat input. The knowledge-base creation flow currently exposes one selectable default at each capability step: **BM25**, **PostgreSQL**, and **File path**. It indexes supported local `.md`, `.markdown`, and `.txt` files, then sends ordinary chat input to BM25 retrieval scoped to the selected knowledge base.
+The UI is entirely in English. Type `/` to open the command palette and select **Knowledge Base**. Press Backspace to delete `/` and return to the chat input. The knowledge-base creation flow currently exposes one selectable default at each capability step: **BM25**, **PostgreSQL**, and **File path**. It asks for the PostgreSQL connection URL during creation, stores that URL in the local knowledge-base catalog, indexes supported local `.md`, `.markdown`, and `.txt` files, then sends ordinary chat input to BM25 retrieval scoped to the selected knowledge base. Existing knowledge bases are listed immediately from that local catalog.
 
-Knowledge-base configuration is stored in `knowledge_bases`; indexed chunks are tagged with `knowledge_base_id` metadata, so retrieval never mixes content from separate knowledge bases. The CLI is structured around UI events, pure state transitions, application use cases, and registered backend/source adapters. To add a future retriever or source type, implement and register a `RetrievalBackend` or `SourceImporter` without changing terminal input handling.
+Knowledge-base configuration, including its PostgreSQL URL, is stored locally at `~/.fatbb/knowledge_bases.json`. On POSIX systems FatBB creates the containing directory with `700` permissions and the catalog with `600` permissions. The URL may contain credentials, so do not share this file. Indexed chunks are tagged with `knowledge_base_id` metadata, so retrieval never mixes content from separate knowledge bases. The CLI is structured around UI events, pure state transitions, application use cases, and registered knowledge-base/source adapters.
+
+## Capability registration
+
+`src/fatbb/config/kb.toml` maps stable knowledge-base identifiers to adapter factories and is committed with the code. A knowledge base persists only identifiers such as `bm25` and `file_path` in its local configuration. When it is used later, `CapabilityRegistry` resolves those identifiers and builds the configured adapter. Terminal navigation, menus, and creation-flow actions are kept separately in `src/fatbb/config/cli.toml`; the CLI does not import KB modules.
+
+To add a knowledge-base capability, implement the relevant domain port and add its factory to `kb.toml`:
+
+```python
+[knowledge_bases.vector]
+label = "Vector"
+factory = "fatbb.infrastructure.kb.vector:VectorKnowledgeBase"
+```
+
+The CLI and knowledge-base workflow do not need to change.
 
 ## Indexing and retrieval
 

@@ -29,3 +29,10 @@ class CliUpdateTests(unittest.TestCase):
         transition = update(UiState(screen=Screen.KNOWLEDGE_BASE_MENU), KeyPressed("up"), item_count=3)
 
         self.assertEqual(transition.state.selected_index, 2)
+
+    def test_database_type_emits_configured_selection_action(self) -> None:
+        transition = update(UiState(screen=Screen.DATABASE_TYPE), KeyPressed("enter"))
+
+        self.assertIs(transition.state.screen, Screen.DATABASE_TYPE)
+        self.assertIsNotNone(transition.action)
+        self.assertEqual(transition.action.kind, "set_database_type")

@@ -2,46 +2,64 @@
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout
+from prompt_toolkit.filters import Condition
+from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
-from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.layout.containers import ConditionalContainer, Window
 from prompt_toolkit.layout.dimension import Dimension
 
 from fatbb.application.knowledge_base_service import KnowledgeBaseService
 from fatbb.application.registry import CapabilityRegistry
-from fatbb.infrastructure.bm25 import PostgresBm25Backend
-from fatbb.infrastructure.local_files import LocalFileImporter
-from fatbb.infrastructure.postgres_knowledge_bases import PostgresKnowledgeBaseRepository
+from fatbb.infrastructure.local.local import Local
 
 from .controller import CliController
-from .view import body, header, prompt
+from .config import CliConfig
+from .state import Screen
+from .view import body, header, palette, prompt
 
 
-def build_controller(database_url: str) -> CliController:
-    registry = CapabilityRegistry()
-    registry.register_backend(PostgresBm25Backend(database_url))
-    registry.register_importer(LocalFileImporter())
-    service = KnowledgeBaseService(PostgresKnowledgeBaseRepository(database_url), registry)
-    return CliController(service)
+def build_controller() -> CliController:
+    """Compose the CLI from configuration-driven capabilities and local state.
+
+    This is the application's composition root: it selects no concrete
+    retrieval or ingestion adapter itself. ``CapabilityRegistry`` reads the
+    source-controlled catalog and constructs the adapter requested later by a
+    selected knowledge base's saved type identifiers.
+    """
+    # ``fatbb/config`` is packaged alongside this module, so the same catalog
+    # is available when running from source or through the installed command.
+    config_directory = Path(__file__).resolve().parents[1] / "config"
+    # Registry owns KB module imports; CLI configuration never names adapters.
+    registry = CapabilityRegistry(config_directory / "kb.toml")
+    # The CLI catalog is deliberately local; PostgreSQL is only a knowledge
+    # base's retrieval/index storage, never the store for CLI configuration.
+    # ``local`` owns all user-machine state: knowledge-base configuration now,
+    # and conversation data or other local concerns in later iterations.
+    local = Local()
+    service = KnowledgeBaseService(local, registry)
+
+    # CLI presentation is separate from KB configuration and registry imports.
+    config = CliConfig(config_directory / "cli.toml")
+    return CliController(service, config)
 
 
 def main() -> None:
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        raise SystemExit("DATABASE_URL is required. See README.md for setup instructions.")
-    controller = build_controller(database_url)
+    """Create the prompt-toolkit runtime and bridge terminal events to the controller."""
+    controller = build_controller()
     app: Application[None]
     syncing = False
 
     def redraw() -> None:
+        """Request a render after a state-changing controller operation."""
         app.invalidate()
 
     def set_buffer(text: str) -> None:
+        """Synchronize programmatic state changes without re-emitting input events."""
         nonlocal syncing
         syncing = True
         buffer.text = text
@@ -49,6 +67,7 @@ def main() -> None:
         syncing = False
 
     def changed(buffer: Buffer) -> None:
+        """Forward typed text; the controller decides whether `/` opens a menu."""
         if syncing:
             return
         controller.on_input_changed(buffer.text)
@@ -59,6 +78,8 @@ def main() -> None:
 
     @key_bindings.add("up")
     def _up(event) -> None:
+        # Selection movement is meaningful only on screens with menu items;
+        # the controller's state reducer safely handles every screen.
         controller.on_key_pressed("up")
         redraw()
 
@@ -69,12 +90,15 @@ def main() -> None:
 
     @key_bindings.add("enter")
     def _enter(event) -> None:
+        # Enter may select a menu item, advance the creation flow, or submit a
+        # chat query. The controller returns the canonical next input text.
         controller.on_key_pressed("enter")
         set_buffer(controller.state.input_text)
         redraw()
 
     @key_bindings.add("escape")
     def _escape(event) -> None:
+        # Close transient menus and clear their triggering input.
         controller.on_key_pressed("escape")
         set_buffer("")
         redraw()
@@ -83,20 +107,47 @@ def main() -> None:
     def _exit(event) -> None:
         event.app.exit()
 
+    # The chat surface always remains mounted. The slash-command palette is a
+    # floating overlay so opening it does not replace or erase conversation.
+    chat = HSplit(
+        [
+            Window(FormattedTextControl(lambda: header(controller)), height=1),
+            Window(FormattedTextControl(lambda: body(controller)), wrap_lines=True),
+            Window(height=1, char="─"),
+            Window(
+                BufferControl(buffer=buffer, focusable=True),
+                height=Dimension.exact(1),
+                get_line_prefix=lambda _line, _wrap: [("class:prompt", prompt(controller))],
+            ),
+        ]
+    )
+    command_palette = Window(
+        FormattedTextControl(lambda: palette(controller)),
+        height=Dimension.exact(5),
+        width=Dimension.exact(44),
+        style="bg:#303030 #ffffff",
+        wrap_lines=True,
+    )
     layout = Layout(
-        HSplit(
-            [
-                Window(FormattedTextControl(lambda: header(controller)), height=1),
-                Window(FormattedTextControl(lambda: body(controller)), wrap_lines=True),
-                Window(height=1, char="─"),
-                Window(
-                    BufferControl(buffer=buffer, focusable=True),
-                    height=Dimension.exact(1),
-                    get_line_prefix=lambda _line, _wrap: [("class:prompt", prompt(controller))],
-                ),
-            ]
+        FloatContainer(
+            content=chat,
+            floats=[
+                Float(
+                    content=ConditionalContainer(
+                        command_palette,
+                        filter=Condition(lambda: controller.state.screen is Screen.PALETTE),
+                    ),
+                    top=2,
+                    left=2,
+                    hide_when_covering_content=False,
+                    transparent=False,
+                    z_index=1,
+                )
+            ],
         )
     )
+    # ``full_screen`` permits a stable overlay layout; the controller remains
+    # terminal-framework independent and can be reused by another UI later.
     app = Application(layout=layout, key_bindings=key_bindings, full_screen=True, mouse_support=False)
     app.run()
 

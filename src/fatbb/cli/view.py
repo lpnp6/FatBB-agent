@@ -19,11 +19,18 @@ def body(controller: CliController) -> HTML:
     parts = [state.status]
     if state.lines:
         parts.extend(("", *state.lines))
-    if controller.items():
+    if controller.items() and state.screen is not Screen.PALETTE:
         parts.extend(("", _menu_text(controller)))
     if state.screen is Screen.KNOWLEDGE_BASE_NAME:
         parts.append("Enter a knowledge base name.")
+    if state.screen is Screen.DATABASE_URL:
+        parts.append("Enter a PostgreSQL connection URL. It will be stored with the knowledge base.")
     return HTML("\n".join(_escape(part) for part in parts))
+
+
+def palette(controller: CliController) -> HTML:
+    """Render the command palette that floats above the chat view."""
+    return HTML("\n".join(_escape(part) for part in ("Command palette", "", _menu_text(controller))))
 
 
 def prompt(controller: CliController) -> str:

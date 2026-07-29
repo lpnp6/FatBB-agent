@@ -1,4 +1,4 @@
-"""Local Markdown/text source adapter."""
+"""Local Markdown/text source importer."""
 
 from __future__ import annotations
 

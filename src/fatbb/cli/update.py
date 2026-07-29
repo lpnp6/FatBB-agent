@@ -21,7 +21,7 @@ class Transition:
 
 
 def update(state: UiState, event: InputChanged | KeyPressed, *, item_count: int = 1) -> Transition:
-    """Return the next state without calling a backend or terminal API."""
+    """Return the next state without calling an adapter or terminal API."""
     if isinstance(event, InputChanged):
         if state.screen is Screen.CHAT and event.text == "/":
             return Transition(replace(state, screen=Screen.PALETTE, input_text="/", selected_index=0))
@@ -47,11 +47,13 @@ def update(state: UiState, event: InputChanged | KeyPressed, *, item_count: int 
     if state.screen is Screen.EXISTING_KNOWLEDGE_BASES:
         return Transition(state, UiAction("select_knowledge_base", str(state.selected_index)))
     if state.screen is Screen.RETRIEVAL_TYPE:
-        return Transition(replace(state, screen=Screen.DATABASE_TYPE, selected_index=0))
+        return Transition(state, UiAction("set_retrieval_type", str(state.selected_index)))
     if state.screen is Screen.DATABASE_TYPE:
-        return Transition(replace(state, screen=Screen.SOURCE_TYPE, selected_index=0))
+        return Transition(state, UiAction("set_database_type", str(state.selected_index)))
+    if state.screen is Screen.DATABASE_URL:
+        return Transition(state, UiAction("set_database_url", state.input_text))
     if state.screen is Screen.SOURCE_TYPE:
-        return Transition(replace(state, screen=Screen.KNOWLEDGE_BASE_NAME, input_text=""))
+        return Transition(state, UiAction("set_source_type", str(state.selected_index)))
     if state.screen is Screen.KNOWLEDGE_BASE_NAME:
         return Transition(state, UiAction("set_knowledge_base_name", state.input_text))
     if state.screen is Screen.SOURCE_PATH:

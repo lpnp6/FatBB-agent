@@ -1,0 +1,72 @@
+# Navigation labels and order for the interactive terminal UI.
+
+[menus.palette]
+items = [{ value = "knowledge_base", label = "Knowledge Base" }]
+
+[menus.knowledge_base]
+items = [
+  { value = "select_existing", label = "Select existing", handler = "fatbb.cli.actions:open_existing_knowledge_bases" },
+  { value = "create_new", label = "Create new", handler = "fatbb.cli.actions:open_knowledge_base_creation" },
+  { value = "back", label = "Back", handler = "fatbb.cli.actions:return_to_chat" },
+]
+
+[menus.retrieval_type]
+items = [{ value = "bm25", label = "BM25" }]
+
+[menus.database_type]
+items = [{ value = "pg", label = "PostgreSQL" }]
+
+[menus.source_type]
+items = [{ value = "file_path", label = "File path" }]
+
+# Pages select an item source. They do not name Python methods, so the config
+# remains presentation data while the controller keeps trusted providers.
+[item_sources.existing_knowledge_bases]
+handler = "fatbb.cli.item_sources:existing_knowledge_bases"
+
+[pages.palette]
+menu = "palette"
+
+[pages.knowledge_base_menu]
+menu = "knowledge_base"
+
+[pages.existing_knowledge_bases]
+item_source = "existing_knowledge_bases"
+
+[pages.retrieval_type]
+menu = "retrieval_type"
+
+[pages.database_type]
+menu = "database_type"
+
+[pages.source_type]
+menu = "source_type"
+
+# State-machine action names are mapped to trusted, source-controlled handler
+# functions. The controller imports these paths only when an action is raised.
+[actions.knowledge_base_menu_selection]
+menu = "knowledge_base_menu"
+
+[actions.select_knowledge_base]
+handler = "fatbb.cli.actions:select_knowledge_base"
+
+[actions.set_knowledge_base_name]
+handler = "fatbb.cli.actions:set_knowledge_base_name"
+
+[actions.set_database_url]
+handler = "fatbb.cli.actions:set_database_url"
+
+[actions.set_retrieval_type]
+handler = "fatbb.cli.actions:set_retrieval_type"
+
+[actions.set_database_type]
+handler = "fatbb.cli.actions:set_database_type"
+
+[actions.set_source_type]
+handler = "fatbb.cli.actions:set_source_type"
+
+[actions.create_knowledge_base]
+handler = "fatbb.cli.actions:create_knowledge_base"
+
+[actions.retrieve]
+handler = "fatbb.cli.actions:retrieve"
