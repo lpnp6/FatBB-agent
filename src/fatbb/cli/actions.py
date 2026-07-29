@@ -55,6 +55,38 @@ def set_database_url(controller: CliController, value: str | None) -> None:
     database_url = (value or "").strip()
     if not database_url:
         raise ValueError("PostgreSQL URL cannot be empty.")
+    # Terminal pastes on Windows can introduce CRLF line endings, and
+    # accidental multi-line clipboard content can embed the database name
+    # before the URL. Extract the intended single-line connection string.
+    if "\n" in database_url or "\r" in database_url:
+        lines = [
+            line.strip()
+            for line in database_url.replace("\r", "\n").split("\n")
+        ]
+        # Prefer a line that looks like a PostgreSQL connection URI.
+        url_lines = [
+            line for line in lines
+            if line.startswith("postgresql://") or line.startswith("postgres://")
+        ]
+        if url_lines:
+            database_url = url_lines[-1]
+            controller.state = replace(
+                controller.state, screen=Screen.SOURCE_TYPE, input_text="",
+                pending_database_url=database_url, selected_index=0,
+                status="URL extracted from multi-line paste.",
+            )
+            return
+        # Fall back to collapsing all whitespace when no URI line is found.
+        collapsed = " ".join(lines)
+        if not collapsed:
+            raise ValueError("PostgreSQL URL cannot be empty.")
+        database_url = collapsed
+        controller.state = replace(
+            controller.state, screen=Screen.SOURCE_TYPE, input_text="",
+            pending_database_url=database_url, selected_index=0,
+            status="URL whitespace was collapsed.",
+        )
+        return
     controller.state = replace(
         controller.state, screen=Screen.SOURCE_TYPE, input_text="",
         pending_database_url=database_url, selected_index=0,
