@@ -45,6 +45,9 @@ class FakeClient(LabelingClient):
         self.calls += 1
         return ExtractionResult(raw_output=output, model=self.model_name)
 
+    async def repair(self, raw_output: str, error_message: str) -> ExtractionResult:
+        return ExtractionResult(raw_output=raw_output, model=self.model_name)
+
 
 class LabelingPipelineTests(unittest.TestCase):
     def test_recipe_is_written_then_deduped_and_checkpointed(self) -> None:

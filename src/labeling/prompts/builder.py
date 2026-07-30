@@ -1,4 +1,4 @@
-"""Prompt assembly for independent, batch-dispatched document labeling."""
+"""Prompt assembly for recipe labelling and repair."""
 
 from __future__ import annotations
 
@@ -8,21 +8,21 @@ from ..interfaces.prompt_builder import PromptBuilder
 
 
 class RecipeLabelingPromptBuilder(PromptBuilder):
-    """Build the single-document prompt reused for every batch item.
+    """Build the single-document labelling prompt reused for every batch item.
 
     A batch is dispatched as independent requests, not as a multi-document
-    prompt. This preserves the one-document/one-JSONL-record contract used by
+    prompt.  This preserves the one-document/one-JSONL-record contract used by
     checkpointing, persistent deduplication, and retry handling.
     """
 
     def __init__(self, system_prompt: str | None = None) -> None:
-        self._system_prompt = system_prompt or self._load_default_system_prompt()
+        self._system_prompt = system_prompt or self._load("system.txt")
 
     @staticmethod
-    def _load_default_system_prompt() -> str:
+    def _load(filename: str) -> str:
         return (
             files("labeling.prompts")
-            .joinpath("system.txt")
+            .joinpath(filename)
             .read_text(encoding="utf-8")
             .strip()
         )
@@ -41,6 +41,43 @@ class RecipeLabelingPromptBuilder(PromptBuilder):
                     "<document_markdown>\n"
                     f"{markdown}\n"
                     "</document_markdown>"
+                ),
+            },
+        ]
+
+
+class RecipeRepairPromptBuilder(PromptBuilder):
+    """Build the repair prompt used when a labelling output fails validation.
+
+    The repair prompt includes the full schema and enum reference so the
+    model can correct specific errors without hallucinating invalid values.
+    """
+
+    def __init__(self, repair_prompt: str | None = None) -> None:
+        self._repair_prompt = repair_prompt or self._load("repair.txt")
+
+    @staticmethod
+    def _load(filename: str) -> str:
+        return (
+            files("labeling.prompts")
+            .joinpath(filename)
+            .read_text(encoding="utf-8")
+            .strip()
+        )
+
+    def build_messages(self, raw_output: str, error_message: str) -> list[dict[str, str]]:
+        """Build a repair request with the broken JSON and validator error."""
+        if not raw_output.strip():
+            raise ValueError("raw_output must not be empty")
+        if not error_message.strip():
+            raise ValueError("error_message must not be empty")
+        return [
+            {"role": "system", "content": self._repair_prompt},
+            {
+                "role": "user",
+                "content": (
+                    f"Validation error: {error_message}\n\n"
+                    f"JSON to repair:\n{raw_output}"
                 ),
             },
         ]

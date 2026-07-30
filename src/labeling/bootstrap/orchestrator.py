@@ -70,8 +70,8 @@ class LabelingPipeline:
         self._retries = retries
 
     async def run(self, manifest: list[dict[str, Any]]) -> dict[str, int]:
-        self._checkpoint.load()
-        self._checkpoint.ensure_items([str(entry["id"]) for entry in manifest])
+        await self._checkpoint.load()
+        await self._checkpoint.ensure_items([str(entry["id"]) for entry in manifest])
         results = await asyncio.gather(*(self._process(entry) for entry in manifest))
         return {status: results.count(status) for status in sorted(set(results))}
 
@@ -84,31 +84,42 @@ class LabelingPipeline:
         existing_line = self._writer.existing_line(item_id)
         if existing_line is not None:
             self._dedup_store.update_status(str(entry["recipe_card_hash"]), HashStatus.ACCEPTED)
-            self._checkpoint.mark_completed(item_id, output_line=existing_line)
+            await self._checkpoint.mark_completed(item_id, output_line=existing_line)
             return "recovered_output"
 
         path = Path(str(entry["path"]))
         last_error = ""
         for _ in range(self._retries + 1):
-            attempt = self._checkpoint.mark_in_flight(item_id, str(entry["recipe_card_hash"]))
+            attempt = await self._checkpoint.mark_in_flight(item_id, str(entry["recipe_card_hash"]))
+            parsed = None
+            result = None
             try:
                 markdown = path.read_text(encoding="utf-8", errors="replace")
                 result = await self._client.label(markdown)
                 parsed = self._validator.parse(result.raw_output)
-                if parsed.is_not_a_recipe:
-                    line_number = self._writer.append({
-                        "id": item_id,
-                        "source_path": str(path),
-                        "recipe_card_hash": str(entry["recipe_card_hash"]),
-                        "model": result.model,
-                        "input": markdown,
-                        "output": parsed.normalized_json,
-                        "is_not_a_recipe": True,
-                    })
-                    self._dedup_store.update_status(str(entry["recipe_card_hash"]), HashStatus.ACCEPTED)
-                    self._checkpoint.mark_completed(item_id, output_line=line_number)
-                    logger.info("Labeling completed as not_a_recipe id=%s output_line=%d attempts=%d", item_id, line_number, attempt)
-                    return "not_a_recipe"
+            except OutputValidationError as error:
+                last_error = str(error)
+                logger.warning("Labeling validation failed id=%s attempt=%d error=%s", item_id, attempt, last_error)
+                if result is not None:
+                    try:
+                        repaired = await self._client.repair(result.raw_output, last_error)
+                        parsed = self._validator.parse(repaired.raw_output)
+                        logger.info("Repair succeeded id=%s attempt=%d", item_id, attempt)
+                        result = repaired
+                    except Exception as repair_error:
+                        logger.warning("Repair failed id=%s attempt=%d error=%s", item_id, attempt, repair_error)
+                        continue
+                else:
+                    continue
+            except Exception as error:
+                last_error = str(error)
+                logger.warning("Labeling attempt failed id=%s attempt=%d error=%s", item_id, attempt, last_error)
+                continue
+
+            if parsed is None or result is None:  # pragma: no cover — defensive
+                continue
+
+            if parsed.is_not_a_recipe:
                 line_number = self._writer.append({
                     "id": item_id,
                     "source_path": str(path),
@@ -116,16 +127,26 @@ class LabelingPipeline:
                     "model": result.model,
                     "input": markdown,
                     "output": parsed.normalized_json,
+                    "is_not_a_recipe": True,
                 })
                 self._dedup_store.update_status(str(entry["recipe_card_hash"]), HashStatus.ACCEPTED)
-                self._checkpoint.mark_completed(item_id, output_line=line_number)
-                logger.info("Labeling completed id=%s output_line=%d attempts=%d", item_id, line_number, attempt)
-                return "completed"
-            except Exception as error:
-                last_error = str(error)
-                logger.warning("Labeling attempt failed id=%s attempt=%d error=%s", item_id, attempt, last_error)
+                await self._checkpoint.mark_completed(item_id, output_line=line_number)
+                logger.info("Labeling completed as not_a_recipe id=%s output_line=%d attempts=%d", item_id, line_number, attempt)
+                return "not_a_recipe"
+            line_number = self._writer.append({
+                "id": item_id,
+                "source_path": str(path),
+                "recipe_card_hash": str(entry["recipe_card_hash"]),
+                "model": result.model,
+                "input": markdown,
+                "output": parsed.normalized_json,
+            })
+            self._dedup_store.update_status(str(entry["recipe_card_hash"]), HashStatus.ACCEPTED)
+            await self._checkpoint.mark_completed(item_id, output_line=line_number)
+            logger.info("Labeling completed id=%s output_line=%d attempts=%d", item_id, line_number, attempt)
+            return "completed"
 
         self._dedup_store.update_status(str(entry["recipe_card_hash"]), HashStatus.REJECTED)
-        self._checkpoint.mark_failed(item_id, last_error)
+        await self._checkpoint.mark_failed(item_id, last_error)
         logger.error("Labeling exhausted retries id=%s error=%s", item_id, last_error)
         return "failed"

@@ -12,7 +12,7 @@ from typing import Any
 
 from ..clients import OpenAILabelingClient
 from ..dedup.simhash_store import SimHashDedupStore
-from ..prompts import RecipeLabelingPromptBuilder
+from ..prompts import RecipeLabelingPromptBuilder, RecipeRepairPromptBuilder
 from .checkpoint import CheckpointManager
 from .orchestrator import JsonlTrainingWriter, LabelingPipeline
 from .sample_corpus import (
@@ -40,6 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default=os.environ.get("OPENAI_BASE_URL"))
     parser.add_argument("--concurrency", type=int, default=5)
     parser.add_argument("--retries", type=int, default=2)
+    parser.add_argument("--max-tokens", type=int, default=16384)
     parser.add_argument("--log-level", default="INFO")
     return parser.parse_args()
 
@@ -80,20 +81,30 @@ def main() -> None:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise SystemExit("OPENAI_API_KEY must be set")
-    logging.basicConfig(level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    output_dir = args.output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=args.log_level.upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(output_dir / "labeling.log", encoding="utf-8"),
+        ],
+    )
     try:
         manifest_path, summary = prepare_manifest(args)
     except ValueError as error:
         raise SystemExit(str(error)) from error
     manifest = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    output_dir = args.output_dir.resolve()
     training_path = output_dir / "training.jsonl"
     dedup_store = SimHashDedupStore(args.dedup_db.resolve())
     try:
         pipeline = LabelingPipeline(
             client=OpenAILabelingClient(
-                api_key=api_key, prompt_builder=RecipeLabelingPromptBuilder(), model=args.model,
-                base_url=args.base_url, max_concurrent=args.concurrency,
+                api_key=api_key, model=args.model,
+                label_prompt_builder=RecipeLabelingPromptBuilder(),
+                repair_prompt_builder=RecipeRepairPromptBuilder(),
+                base_url=args.base_url, max_concurrent=args.concurrency, max_tokens=args.max_tokens,
             ),
             dedup_store=dedup_store,
             checkpoint=CheckpointManager(output_dir / "checkpoint.json", manifest_path=manifest_path, output_path=training_path),

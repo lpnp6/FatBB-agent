@@ -1,5 +1,5 @@
 """Prompt templates and builders for recipe labeling."""
 
-from .builder import RecipeLabelingPromptBuilder
+from .builder import RecipeLabelingPromptBuilder, RecipeRepairPromptBuilder
 
-__all__ = ["RecipeLabelingPromptBuilder"]
+__all__ = ["RecipeLabelingPromptBuilder", "RecipeRepairPromptBuilder"]

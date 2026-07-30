@@ -29,6 +29,7 @@ class TasteProfile(str, Enum):
     SOUR = "sour"
     SALTY = "salty"
     UMAMI = "umami"
+    SAVORY = "savory"
     BITTER = "bitter"
     MILD = "mild"
     FRAGRANT = "fragrant"
@@ -95,11 +96,14 @@ class CookingMethod(str, Enum):
     SIMMER = "simmer"
     BLANCH = "blanch"
     SLOW_COOK = "slow-cook"
+    OTHER = "other"
 
 
 class HeatLevel(str, Enum):
     HIGH_HEAT = "high_heat"
+    MEDIUM_HIGH = "medium_high"
     MEDIUM_HEAT = "medium_heat"
+    MEDIUM_LOW = "medium_low"
     LOW_HEAT = "low_heat"
     SIMMER = "simmer"
 

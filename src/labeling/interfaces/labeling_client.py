@@ -31,6 +31,22 @@ class LabelingClient(ABC):
         """
         ...
 
+    @abstractmethod
+    async def repair(self, raw_output: str, error_message: str) -> ExtractionResult:
+        """Fix a validation error in a previously-generated JSON output.
+
+        The model receives only the broken JSON and the validator error
+        message — no recipe markdown. It must return the corrected JSON.
+
+        Args:
+            raw_output: The original (invalid) JSON string.
+            error_message: The validator error describing what is wrong.
+
+        Returns:
+            ExtractionResult with the corrected JSON output.
+        """
+        ...
+
     @property
     @abstractmethod
     def model_name(self) -> str:

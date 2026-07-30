@@ -12,7 +12,7 @@ venv/
 .idea/
 
 # Data (large corpus, not version-controlled)
-data/markdown/
+data/
 src/labeling/dedup/dedup_store.db
 src/labeling/dedup/dedup_store.db-shm
 src/labeling/dedup/dedup_store.db-wal

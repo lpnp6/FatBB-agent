@@ -10,8 +10,8 @@ from labeling.interfaces.prompt_builder import PromptBuilder
 
 
 class StubPromptBuilder(PromptBuilder):
-    def build_messages(self, markdown: str) -> list[dict[str, str]]:
-        return [{"role": "user", "content": markdown}]
+    def build_messages(self, *args: object, **kwargs: object) -> list[dict[str, str]]:
+        return [{"role": "user", "content": str(args[0] if args else "")}]
 
 
 class FakeCompletions:
@@ -36,10 +36,12 @@ class OpenAILabelingClientTests(unittest.IsolatedAsyncioTestCase):
         )
         completions = FakeCompletions(response)
         client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        stub = StubPromptBuilder()
         labeling_client = OpenAILabelingClient(
             api_key="test-key",
-            prompt_builder=StubPromptBuilder(),
             model="test-model",
+            label_prompt_builder=stub,
+            repair_prompt_builder=stub,
             base_url="https://example.test/v1",
             max_concurrent=2,
             client=client,
@@ -60,7 +62,7 @@ class OpenAILabelingClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completions.calls, [{
             "model": "test-model",
             "messages": [{"role": "user", "content": "not a recipe"}],
-            "max_tokens": 4096,
+            "max_tokens": 16384,
             "response_format": {"type": "json_object"},
         }])
 
@@ -70,8 +72,11 @@ class OpenAILabelingClientTests(unittest.IsolatedAsyncioTestCase):
             usage=None,
         )
         client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions(response)))
+        stub = StubPromptBuilder()
         labeling_client = OpenAILabelingClient(
-            api_key="test-key", prompt_builder=StubPromptBuilder(), model="test-model", client=client,
+            api_key="test-key", model="test-model",
+            label_prompt_builder=stub, repair_prompt_builder=stub,
+            client=client, empty_response_retries=0,
         )
 
         with self.assertRaisesRegex(RuntimeError, "empty completion"):
