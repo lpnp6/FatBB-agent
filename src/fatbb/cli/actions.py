@@ -123,13 +123,62 @@ def set_source_type(controller: CliController, value: str | None) -> None:
 
 
 def create_knowledge_base(controller: CliController, value: str | None) -> None:
-    """Create and index a knowledge base from the pending configuration."""
+    """Create and index a knowledge base from the pending configuration.
+
+    The heavy import and indexing work runs in a background thread so the
+    terminal UI stays responsive.  Progress is streamed into the body via
+    :meth:`CliController.report_progress` and the final result is posted
+    back to the chat screen when the work completes.
+
+    Only one indexing operation is allowed at a time; a second attempt
+    while indexing is in progress is silently ignored.
+    """
     state = controller.state
-    knowledge_base = controller._service.create(
-        state.pending_name, state.pending_retrieval_type, state.pending_database_type,
-        state.pending_database_url, state.pending_source_type, (value or "").strip(),
+    app = controller._app
+    source_path = (value or "").strip()
+
+    # Snapshot pending configuration before handing it to the worker thread.
+    pending_name = state.pending_name
+    pending_retrieval_type = state.pending_retrieval_type
+    pending_database_type = state.pending_database_type
+    pending_database_url = state.pending_database_url
+    pending_source_type = state.pending_source_type
+
+    # Show the user that work has started immediately.
+    controller.state = replace(
+        controller.state,
+        status="Indexing documents…",
+        progress="Starting…",
     )
-    _activate(controller, knowledge_base, f'Indexed and selected "{knowledge_base.name}".')
+    if app is not None:
+        app.invalidate()  # type: ignore[union-attr]
+
+    def _run() -> None:
+        try:
+            kb = controller._service.create(
+                pending_name, pending_retrieval_type, pending_database_type,
+                pending_database_url, pending_source_type, source_path,
+                on_progress=controller.report_progress,
+            )
+            _activate(controller, kb, f'Indexed and selected "{kb.name}".')
+            controller.state = replace(controller.state, progress="")
+            if app is not None:
+                app.invalidate()  # type: ignore[union-attr]
+        except Exception as exc:
+            controller.state = replace(
+                controller.state,
+                status=f"Error: {exc}",
+                progress="",
+            )
+            if app is not None:
+                app.invalidate()  # type: ignore[union-attr]
+
+    if not controller.submit_background_indexing(_run):
+        controller.state = replace(
+            controller.state,
+            status="An indexing operation is already in progress.",
+            progress="",
+        )
 
 
 def retrieve(controller: CliController, value: str | None) -> None:

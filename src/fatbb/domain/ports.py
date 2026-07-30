@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Protocol
 
 from rag.interfaces.indexer import Indexer
@@ -36,7 +36,7 @@ class SourceImporter(Protocol):
     # Registry key, for example ``file_path`` or a future ``s3`` importer.
     type: str
 
-    def load(self, path: str, *, knowledge_base_id: str) -> Sequence[Document]: ...
+    def load(self, path: str, *, knowledge_base_id: str, on_progress: Callable[[str, int, int], None] | None = None) -> Sequence[Document]: ...
 
 
 class KnowledgeBaseAdapter(Protocol):

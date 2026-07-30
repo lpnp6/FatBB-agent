@@ -166,6 +166,7 @@ def main() -> None:
     # ``full_screen`` permits a stable overlay layout; the controller remains
     # terminal-framework independent and can be reused by another UI later.
     app = Application(layout=layout, key_bindings=key_bindings, full_screen=True, mouse_support=False)
+    controller._app = app
     app.run()
 
 

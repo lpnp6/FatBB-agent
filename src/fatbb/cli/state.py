@@ -33,4 +33,5 @@ class UiState:
     pending_source_type: str = ""
     pending_source_path: str = ""
     status: str = "Type / to open the command palette."
+    progress: str = ""
     lines: tuple[str, ...] = field(default_factory=tuple)

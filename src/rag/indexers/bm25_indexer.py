@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import logging
 
 from tqdm import tqdm
@@ -23,14 +23,22 @@ class BM25Indexer(Indexer):
         self._chunker = chunker
         self._store = store
 
-    def upsert_documents(self, documents: Sequence[Document]) -> None:
+    def upsert_documents(
+        self, documents: Sequence[Document], *,
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ) -> None:
         """Rebuild each document's chunks for the backend BM25 index."""
-        logger.info("Upserting documents into BM25 index", extra={"document_count": len(documents)})
-        for document in tqdm(documents, desc="Upserting documents", unit="document"):
+        total = len(documents)
+        logger.info("Upserting documents into BM25 index", extra={"document_count": total})
+        for idx, document in enumerate(
+            tqdm(documents, desc="Upserting documents", unit="document", disable=on_progress is not None)
+        ):
+            if on_progress is not None:
+                on_progress("Upserting documents", idx + 1, total)
             chunks = self._chunker.chunk(document)
             self._validate_chunks(document, chunks)
             self._store.replace_document_chunks(document.id, chunks)
-        logger.info("Completed BM25 document upsert", extra={"document_count": len(documents)})
+        logger.info("Completed BM25 document upsert", extra={"document_count": total})
 
     def delete_documents(self, document_ids: Sequence[str]) -> None:
         """Remove indexed chunks for deleted source documents."""

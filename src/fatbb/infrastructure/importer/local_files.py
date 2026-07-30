@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from hashlib import sha256
 import logging
 from pathlib import Path
@@ -18,7 +19,11 @@ class LocalFileImporter:
     type = "file_path"
     _supported_suffixes = {".md", ".markdown", ".txt"}
 
-    def load(self, path: str, *, knowledge_base_id: str) -> list[Document]:
+    def load(
+        self, path: str, *,
+        knowledge_base_id: str,
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ) -> list[Document]:
         source_path = Path(path).expanduser().resolve()
         if not source_path.exists():
             raise ValueError(f"Path does not exist: {source_path}")
@@ -27,9 +32,14 @@ class LocalFileImporter:
             item for item in paths
             if item.is_file() and item.suffix.lower() in self._supported_suffixes
         ]
-        logger.info("Loading local source files", extra={"file_count": len(supported_paths)})
+        total = len(supported_paths)
+        logger.info("Loading local source files", extra={"file_count": total})
         documents: list[Document] = []
-        for item in tqdm(supported_paths, desc="Loading documents", unit="file"):
+        for idx, item in enumerate(
+            tqdm(supported_paths, desc="Loading documents", unit="file", disable=on_progress is not None)
+        ):
+            if on_progress is not None:
+                on_progress("Loading documents", idx + 1, total)
             try:
                 content = item.read_text(encoding="utf-8")
             except UnicodeDecodeError as error:

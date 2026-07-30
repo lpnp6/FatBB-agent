@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import logging
 from uuid import uuid4
 
@@ -34,7 +35,8 @@ class KnowledgeBaseService:
 
     def create(
         self, name: str, retrieval_type: str, database_type: str, database_url: str,
-        source_type: str, source_path: str,
+        source_type: str, source_path: str, *,
+        on_progress: Callable[[str, int, int], None] | None = None,
     ) -> KnowledgeBase:
         """Import a source path, index its documents, and persist its metadata.
 
@@ -56,13 +58,17 @@ class KnowledgeBaseService:
             id=str(uuid4()), name=normalized_name, config=config, source_path=source_path
         )
 
-        adapter = self._registry.knowledge_base(config.retrieval_type, config.database_type)
         logger.info(
-            "Checking database connection before creating knowledge base",
-            extra={"knowledge_base": knowledge_base.name, "database_type": config.database_type},
+            "Resolving knowledge-base adapter for creation",
+            extra={"retrieval_type": config.retrieval_type, "database_type": config.database_type},
         )
+        adapter = self._registry.knowledge_base(config.retrieval_type, config.database_type)
+        if on_progress is not None:
+            on_progress("Connecting to database", 0, 1)
         try:
             adapter.check_connection(config.database_url)
+            if on_progress is not None:
+                on_progress("Database connection successful", 1, 1)
         except Exception as error:
             logger.exception(
                 "Database connection check failed",
@@ -73,9 +79,13 @@ class KnowledgeBaseService:
             ) from error
 
         # Importers attach the generated ID to each document for retrieval scoping.
+        logger.info(
+            "Resolving importer adapter for source_type=%r",
+            config.source_type,
+        )
         logger.info("Loading source documents", extra={"knowledge_base": knowledge_base.name})
         importer = self._registry.importer(config.source_type)
-        documents = importer.load(source_path, knowledge_base_id=knowledge_base.id)
+        documents = importer.load(source_path, knowledge_base_id=knowledge_base.id, on_progress=on_progress)
         if not documents:
             raise ValueError("No supported files were found at the specified path.")
 
@@ -84,7 +94,7 @@ class KnowledgeBaseService:
             "Indexing source documents",
             extra={"knowledge_base": knowledge_base.name, "document_count": len(documents)},
         )
-        adapter.indexer(config.database_url).upsert_documents(documents)
+        adapter.indexer(config.database_url).upsert_documents(documents, on_progress=on_progress)
         self._repository.create_knowledge_base(knowledge_base)
         logger.info(
             "Knowledge base created",
@@ -94,6 +104,11 @@ class KnowledgeBaseService:
 
     def retrieve(self, knowledge_base: KnowledgeBase, question: str) -> list[Evidence]:
         """Retrieve the five best keyword matches scoped to one knowledge base."""
+        logger.info(
+            "Resolving knowledge-base adapter for retrieval",
+            extra={"retrieval_type": knowledge_base.config.retrieval_type,
+                   "database_type": knowledge_base.config.database_type},
+        )
         return self._registry.knowledge_base(
             knowledge_base.config.retrieval_type, knowledge_base.config.database_type
         ).retriever(

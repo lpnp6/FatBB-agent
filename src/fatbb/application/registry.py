@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import import_module
+import logging
 from pathlib import Path
 import tomllib
 
 from fatbb.domain.ports import KnowledgeBaseAdapter, SourceImporter
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -40,9 +43,14 @@ class CapabilityRegistry:
 
     def knowledge_base(self, retrieval_type: str, database_type: str) -> KnowledgeBaseAdapter:
         """Build the knowledge-base adapter configured for stored type keys."""
+        logger.info(
+            "Building knowledge-base adapter: retrieval_type=%r database_type=%r",
+            retrieval_type, database_type,
+        )
         try:
             definition = self._knowledge_bases[retrieval_type]
         except KeyError as error:
+            logger.exception("Unsupported retrieval type: %r", retrieval_type)
             raise ValueError(f"Unsupported retrieval type: {retrieval_type}") from error
         if definition.database_type != database_type:
             raise ValueError(
@@ -54,9 +62,11 @@ class CapabilityRegistry:
 
     def importer(self, source_type: str) -> SourceImporter:
         """Build the importer configured for a stored type key."""
+        logger.info("Building importer adapter: source_type=%r", source_type)
         try:
             return self._build(self._importers[source_type], SourceImporter)
         except KeyError as error:
+            logger.exception("Unsupported source type: %r", source_type)
             raise ValueError(f"Unsupported source type: {source_type}") from error
 
     @staticmethod
@@ -108,17 +118,22 @@ class CapabilityRegistry:
         while parsing ``kb.toml``. The method also verifies the small
         runtime method surface required by the selected domain port.
         """
+        module_name, class_name = definition.factory.split(":", maxsplit=1)
+        logger.info(
+            "Building capability %r: importing %r, instantiating %r",
+            definition.key, module_name, class_name,
+        )
         try:
-            # Factory paths use ``package.module:ClassName`` syntax so the TOML
-            # file can be reviewed and changed independently of app.py.
-            module_name, class_name = definition.factory.split(":", maxsplit=1)
             factory = getattr(import_module(module_name), class_name)
-            # The adapter itself is short-lived and receives connection details
-            # later through its indexer()/retriever() method.
             adapter = factory()
         except (ImportError, AttributeError, TypeError, ValueError) as error:
+            logger.exception(
+                "Failed to build capability %r from %r: %s",
+                definition.key, definition.factory, error,
+            )
             raise RuntimeError(
-                f"Unable to build capability {definition.key!r} from {definition.factory!r}."
+                f"Unable to build capability {definition.key!r} from "
+                f"{definition.factory!r}: {error}"
             ) from error
         # Protocols are structural and cannot be used as a runtime isinstance
         # check; verify the minimal method surface expected by each caller.
@@ -129,4 +144,5 @@ class CapabilityRegistry:
         )
         if not all(callable(getattr(adapter, name, None)) for name in required):
             raise RuntimeError(f"Capability {definition.key!r} does not implement its required adapter port.")
+        logger.info("Capability %r built successfully.", definition.key)
         return adapter

@@ -17,6 +17,8 @@ def header(controller: CliController) -> HTML:
 def body(controller: CliController) -> HTML:
     state = controller.state
     parts = [state.status]
+    if state.progress:
+        parts.append(f"  {state.progress}")
     if state.lines:
         parts.extend(("", *state.lines))
     if controller.items() and state.screen is not Screen.PALETTE:

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from importlib import import_module
+import threading
 from typing import cast
 
 from fatbb.application.knowledge_base_service import KnowledgeBaseService
@@ -24,8 +26,44 @@ class CliController:
         self._service = service
         self._config = config
         self.state = UiState()
+        self._app: object = None
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._indexing_lock = threading.Lock()
         self._existing: list[KnowledgeBase] = []
         self._active_knowledge_base: KnowledgeBase | None = None
+
+    def report_progress(self, description: str, current: int, total: int) -> None:
+        """Thread-safe: update the progress line shown in the TUI body.
+
+        Called from a background thread during indexing.  Under CPython's GIL
+        both ``self.state =`` (a single pointer-store) and
+        ``app.invalidate()`` (a flag write) are safe to perform from any
+        thread, so we avoid the ``call_from_executor`` round-trip that can
+        stall on Windows event loops.
+        """
+        self.state = replace(
+            self.state,
+            progress=f"{description}: {current}/{total}" if total else description,
+        )
+        app = self._app
+        if app is not None:
+            app.invalidate()  # type: ignore[union-attr]
+
+    def submit_background_indexing(self, task: Callable[[], None]) -> bool:
+        """Run *task* on the shared executor, skipping if indexing is already active.
+
+        Returns ``True`` when the task was submitted, ``False`` when an
+        indexing operation was already in progress.
+        """
+        if not self._indexing_lock.acquire(blocking=False):
+            return False
+        def _wrapper() -> None:
+            try:
+                task()
+            finally:
+                self._indexing_lock.release()
+        self._executor.submit(_wrapper)
+        return True
 
     def items(self) -> tuple[str, ...]:
         """Resolve the active page's configured item source."""
