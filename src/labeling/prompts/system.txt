@@ -81,7 +81,7 @@ IDENTIFIERS, LANGUAGE, AND ENUMS
 - Canonical `dish.name`, `ingredients[].name`, descriptions, notes, and tips are English. Preserve multilingual/original names in `dish.aliases`; do not translate enum values.
 - A slug is its canonical English name lowercased with spaces and punctuation replaced by hyphens (for example "Chicken Breast" -> "chicken-breast"). Every `cooking_steps[].ingredient_refs`, `ingredient_relations[].from_ingredient`, and `ingredient_relations[].to_ingredient` must use ingredient slugs and refer to an ingredient in `ingredients`. Every `dish_relations[].from_dish` must equal the primary dish slug; `dish_relations[].to_dish` is the related dish slug.
 - dish_type: main_dish, staple, soup, snack, dessert, cold_dish, dipping_sauce, beverage, baked_goods, other
-- taste_profile: spicy, numbing, sweet, sour, salty, umami, savory, bitter, mild, fragrant, pungent, astringent, oily, tangy
+- taste_profile: spicy, numbing, sweet, sour, salty, umami, savory, bitter, mild, fragrant, pungent, astringent, oily, tangy, smoky
 - dietary: vegetarian, vegan, halal, gluten_free, lactose_free, nut_free, low_carb, high_protein, keto_friendly
 - ingredient category: meat, poultry, seafood, dairy_eggs, vegetable, fruit, mushroom_fungi, soy_products, grain, seasoning, oils_fats, nuts_seeds, medicinal_herbs, processed, other
 - cooking method: stir-fry, pan-fry, deep-fry, steam, boil, roast/bake, braise, stew, quick-fry, flash-fry, toss/mix, braise-in-sauce, smoke, instant-boil, bake, simmer, blanch, slow-cook, grill, other
