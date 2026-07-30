@@ -45,12 +45,37 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _validate_manifest_paths(manifest_path: Path, args: argparse.Namespace) -> None:
+    """Check that the paths recorded in a reused manifest still exist on disk.
+
+    Sampling bakes absolute paths into every record.  If the corpus was moved
+    or the user passes a different ``--source-dir`` while keeping the same
+    ``--output-dir``, the labeling phase would crash with ``FileNotFoundError``
+    for every entry.  Catch that early with a clear message.
+    """
+    records = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    missing: list[str] = []
+    for record in records:
+        record_path = Path(str(record["path"]))
+        if not record_path.is_file():
+            missing.append(str(record_path))
+            if len(missing) >= 5:  # report first 5, don't flood output
+                break
+    if missing:
+        raise FileNotFoundError(
+            f"{len(missing)} of {len(records)} paths in {manifest_path.name} no longer exist. "
+            f"First missing:\n  " + "\n  ".join(missing) +
+            f"\nCheck that --source-dir={args.source_dir} matches the corpus used during sampling."
+        )
+
+
 def prepare_manifest(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     """Create the sampling artifacts once, or reuse them for a safe resume."""
     output_dir = args.output_dir.resolve()
     manifest_path = output_dir / "manifest.jsonl"
     if manifest_path.exists():
         logger.info("Reusing existing bootstrap manifest path=%s", manifest_path)
+        _validate_manifest_paths(manifest_path, args)
         return manifest_path, {"sampling": "reused"}
 
     source_name = args.source_name.strip()
