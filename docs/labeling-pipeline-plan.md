@@ -15,36 +15,33 @@ FatBB-agent needs 500–1000 seed labels for fine-tuning Qwen2.5-3B-Instruct. We
 | Cuisine / taste / dietary are only in blog prose | wprm_print alone misses these; need **hybrid**: full-page for prose, wprm_print for nutrition |
 | Recipe card (`### Ingredients` / `### Instructions`) structure is consistent | Prompt can rely on this marker pattern |
 | Nutrition data only in wprm_print | Use wprm_print variant when available |
-| Non-recipe pages exist (roundups, gift guides, etc.) | Additional filter: require both `### Ingredients` AND `### Instructions` headers |
+| Non-recipe pages exist (roundups, gift guides, etc.) | Let the labeling model explicitly return `not_a_recipe`; do not discard them with a heuristic pre-filter |
 
 ## Sampling Strategy
 
-### preprocessor.py: Filter Non-Recipe Pages
+### No Pre-Filtering: Model-Decided Non-Recipe Rejection
 
-A single concrete module. Two-pass classification — fast rules first, heuristics on survivors:
+The pipeline does **not** implement a standalone `preprocessor.py` or a
+rule/heuristic non-recipe filter. All corpus files remain eligible for
+sampling (subject only to deduplication), then the labeling model decides
+whether the input is a recipe.
 
-**Pass 1: Rule-based** — filename patterns, file size, structure markers:
-  - Exclude by filename pattern: comment-page-N, catch-up, gift-guide, about,
-    holiday, menu, roundup, weekly-meal-plan, christmas-selfie, dozer-update,
-    new-recipes-were-loving, essential-salad-dressings, spices-for,
-    mothers-day-breakfasts, creative-bites, asian-meals-on-the-table
-  - Exclude by size: file < 2KB (cookbook teasers, page fragments)
-  - Exclude by structure: file missing `### Ingredients` OR `### Instructions`
+The prompt must require a non-recipe input to return the explicit rejection
+shape `{"dish": null, "reason": "not_a_recipe"}`. The validator accepts this
+shape only when no recipe fields are populated. The orchestrator saves it as
+a completed, rejected result and records it in batch statistics; it is never
+included in review queues or the QLoRA training dataset.
 
-**Pass 2: Heuristic** — content analysis catches what rules miss:
-  - Files with >3 recipe-like headings = roundup
-  - Files where intro text > 80% of total content = blog post
-  - Ingredients section with >50 bullet points = directory/roundup
-
-Output: `data/preprocessor_report.json`
-  - total: 5564
-  - recipes: ~2900 (estimated)
-  - non_recipe breakdown by reason
-```
+This keeps one source of truth for the decision, avoids brittle filename and
+heading rules, and preserves formats such as `wprm_print` that may not use
+the usual Markdown headings. Sampling replenishes rejected entries until the
+target number of accepted recipe labels is reached.
 
 ### DedupStore: Persistent Content-Level De-duplication
 
-Content-level duplicates survive the preprocessor (same content, different filenames). A persistent `DedupStore` module prevents them from ever reaching the API:
+Content-level duplicates can occur anywhere in the raw corpus (same content,
+different filenames). A persistent `DedupStore` module prevents them from ever
+reaching the API:
 
 | Duplicate scenario | Example | Detection method |
 |---|---|---|
@@ -140,16 +137,16 @@ class MemoryDedupStore(DedupStore):
 
 **Storage**: SQLite file at `data/dedup_store.db`. Lightweight (~1KB per 1000 entries). The same store is used during bootstrap labeling AND production auto-labeling — preventing both duplicate API costs and duplicate training data.
 
-Expected dedup: ~200-400 files removed from the 2,900 candidate pool.
+Expected dedup: ~200-400 files removed from the raw corpus before model calls.
 
 ### Three-Round Sampling (with Checkpoint)
 
-| Round | Count | Purpose |
+| Round | Accepted recipe labels | Purpose |
 |-------|-------|---------|
 | Round 1 | 200 | Broad coverage -> initial prompt testing |
 | Round 2 | 200 | Fill gaps found in Round 1, refine prompt |
 | Round 3 | 100 | Targeted edge cases, ambiguous cuisine, complex recipes |
-| **Total** | **500** | Target for bootstrap |
+| **Total** | **500** | Target for bootstrap; rejected non-recipes are replaced from the candidate pool |
 
 ### CheckpointManager: Resume-Safe Labeling
 
@@ -161,7 +158,7 @@ File lifecycle states:
   in_flight  -> API call in progress (prevent double-submit on crash recovery)
   completed  -> labeled + validated + saved
   failed     -> exceeded retries, flagged for manual review
-  skipped    -> filtered out by preprocessor or dedup
+  skipped    -> duplicate or otherwise ineligible before a model call
 ```
 
 ```python
@@ -233,7 +230,11 @@ Output: `data/samples/manifest.jsonl`
 
 ### Holdout Set
 
-Before any labeling begins, randomly sample **50 files** from the deduped pool and set them aside. These files will **never** be used for training or prompt development. They serve as the final evaluation benchmark for the v1 fine-tuned model.
+Before any labeling begins, reserve a deduped candidate pool for **50 accepted
+recipe holdout examples**. If the model rejects a holdout candidate as
+`not_a_recipe`, replace it from the reserved pool. These files will **never**
+be used for training or prompt development. They serve as the final evaluation
+benchmark for the v1 fine-tuned model.
 
 Why hold out before labeling:
 - If these files were in the labeled set, the model might memorize similar patterns -> inflated eval scores
@@ -400,9 +401,8 @@ src/labeling/
 │   └── common.py               #   Shared types (FilePath, TokenUsage, etc.)
 ├── config.py                   # API keys, model selection, rate limits, paths
 │
-├── preprocessor.py             # Classify files -> recipe pool vs non-recipe (rules + heuristics)
 ├── loader.py                   # Markdown loading + comment stripping + recipe-card extraction
-├── sampler.py                  # Stratified sampling from preprocessed recipe pool
+├── sampler.py                  # Stratified sampling from the deduped raw corpus
 │
 ├── dedup/                      # Content-hash dedup subpackage
 │   ├── __init__.py
@@ -460,7 +460,9 @@ interfaces.py
             +-- PromptBuilder           (prompts/builder.py)
 ```
 
-`preprocessor.py` is a single concrete module — it runs once to produce the clean recipe pool, no backend-swapping needed.
+Non-recipe classification belongs to the model output contract, not a separate
+preprocessing module. `sampler.py` draws candidates from the deduped raw
+corpus and replenishes them when the model rejects a candidate.
 
 ### Orchestrator (model-agnostic)
 
@@ -526,13 +528,12 @@ results = asyncio.run(pipeline.run(auto_label_manifest))
 
 ```
 data/
-├── preprocessor_report.json   # Preprocessor run results (file classifications)
 ├── dedup_store.db             # Persistent recipe-card hash DB (SQLite)
 ├── checkpoint.json            # Resume-safe labeling progress state
 │
 ├── samples/
-│   ├── manifest.jsonl         # 500 sampled files for labeling (3 rounds)
-│   └── holdout.jsonl          # 50 files set aside before labeling — final evaluation only
+│   ├── manifest.jsonl         # Candidate queue; replenished until 500 recipes are accepted
+│   └── holdout.jsonl          # 50 candidate files set aside before labeling — final evaluation only
 ├── labels/
 │   ├── batch_001/             # Round 1 outputs (200 JSON files + batch manifest)
 │   ├── batch_002/             # Round 2 (200 files)
@@ -552,15 +553,11 @@ data/
 corpus (5564 files)
     |
     v
-[preprocessor.py]  --> data/preprocessor_report.json
-    |                     2-pass: rules -> heuristics
-    |                     2,900 recipe files identified
+[DedupStore]  --> data/dedup_store.db (deduplicate the raw corpus)
     v
-[sampler.py]  --> data/dedup_store.db (initial population)
-    v
-[sampler.py]  --> data/dedup_store.db (initial population)
-    |               data/samples/manifest.jsonl (500 files)
-    |               data/samples/holdout.jsonl  (50 files)
+[sampler.py]  --> data/samples/manifest.jsonl (candidate queue)
+    |               replenished until 500 recipe labels are accepted
+    |               data/samples/holdout.jsonl  (reserved candidates for 50 accepted recipes)
     v
 [orchestrator.py]
     |  for each file in manifest:
@@ -568,9 +565,9 @@ corpus (5564 files)
     |    2. dedup_store.is_duplicate() # check persistent hash DB -> skip if known
     |    3. checkpoint.mark_in_flight() # prevents double-submit on crash resume
     |    4. client.label()             # Claude API or local model (abstract interface)
-    |    5. validator.check()          # JSON parse + schema + cross-ref + sanity
+    |    5. validator.check()          # JSON/schema/cross-ref/sanity; accepts explicit not_a_recipe rejection
     |    6. scorer.score()             # 0-1 confidence
-    |    7. save to data/labels/
+    |    7. save result; exclude not_a_recipe results from training and review queues
     |    8. dedup_store.register()     # persist hash for future dedup
     |    9. checkpoint.mark_completed() # atomically advance checkpoint
     |
@@ -603,11 +600,12 @@ corpus (5564 files)
    - Ex 1: Simple main dish (African Chicken Curry) — core fields
    - Ex 2: Complex dish with multi-step (Pumpkin Layer Cake) — cooking_steps + ingredient_refs
    - Ex 3: Ambiguous cuisine (Teriyaki Salmon — Japanese/American) — confidence handling
-   - Ex 4: Non-recipe page -> `{"dish": null, "reason": "not_a_recipe"}` — rejection behavior
+   - Ex 4: Non-recipe page -> `{"dish": null, "reason": "not_a_recipe"}` — required rejection behavior
 
 ### Key Prompt Decisions
 
 - **Single-pass extraction** — one API call per file (not multi-step)
+- **Model-decided eligibility** — no non-recipe heuristic filter; the model emits the explicit `not_a_recipe` rejection shape
 - **Enum injection** — all enum values in system prompt to prevent mismatches
 - **Comment stripping** — truncate markdown after `## Life of Dozer` or before user comments section to save tokens
 - **Model**: GPT-4o or compatible (structured JSON output with `response_format`)
@@ -690,13 +688,12 @@ Config: `r=16, alpha=32, 4-bit, batch=1, grad_accum=4, lr=2e-4, epochs=3, max_se
 
 ## Verification
 
-1. `preprocessor.py` -> scan all 5,564 files -> generates `preprocessor_report.json` with recipe/non-recipe breakdown
-2. `dedup_store.py` -> run on preprocessed pool -> verify ~200-400 duplicates caught by content hash
-3. `sampler.py` -> from deduped recipe pool -> stratified 500 files + 50 holdout -> check coverage across dish types, domains, complexity
-4. `loader.py` -> test on 10 files from each domain, verify comment stripping and recipe-card extraction
-5. Pilot: run `OpenAILabelingClient` on 5 test files -> manually inspect JSON output quality
-6. `validator.py` -> run on all labeled outputs, target >=80% pass rate per batch
-7. `checkpoint.py` -> simulate crash at file #30 of 50 -> resume -> confirm exactly 20 remaining files processed, 0 duplicates
-8. Swap test: create `LocalModelLabelingClient` with a dummy model, confirm orchestrator runs unchanged
-9. `dataset_builder.py` -> verify train.jsonl/val.jsonl loadable by `Dataset.from_json()`
-10. End-to-end: preprocess -> dedup -> sample -> pilot -> 200x3 rounds with checkpoint -> review -> dataset ready
+1. `dedup_store.py` -> run on the raw corpus -> verify ~200-400 duplicates caught by content hash
+2. `sampler.py` -> sample from the deduped raw corpus; verify domain, dish-type, and complexity coverage
+3. `loader.py` -> test on 10 files from each domain, verify comment stripping and recipe-card extraction
+4. Pilot: run `OpenAILabelingClient` on recipe and non-recipe examples; verify the latter produce only `{"dish": null, "reason": "not_a_recipe"}`
+5. `validator.py` -> validate all outputs, including rejection-shape validation; target >=80% accepted-recipe pass rate per batch
+6. `checkpoint.py` -> simulate crash at file #30 of 50 -> resume -> confirm exactly 20 remaining files processed, 0 duplicates
+7. Swap test: create `LocalModelLabelingClient` with a dummy model, confirm orchestrator runs unchanged
+8. `dataset_builder.py` -> verify only accepted recipes enter train.jsonl/val.jsonl and both load via `Dataset.from_json()`
+9. End-to-end: dedup -> sample -> pilot -> 200x3 accepted labels with checkpoint/replenishment -> review -> dataset ready
