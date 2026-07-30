@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from time import perf_counter
 from typing import Any
 
 from ..interfaces.labeling_client import LabelingClient
 from ..interfaces.prompt_builder import PromptBuilder
 from ..models.common import ExtractionResult, TokenUsage
+
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAILabelingClient(LabelingClient):
@@ -65,21 +69,32 @@ class OpenAILabelingClient(LabelingClient):
     async def label(self, markdown: str) -> ExtractionResult:
         """Send one Markdown document and normalize the provider response."""
         messages = self._prompt_builder.build_messages(markdown)
-        started_at = perf_counter()
         async with self._semaphore:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                max_tokens=self._max_tokens,
-                response_format={"type": "json_object"},
+            logger.info(
+                "Dispatching labeling request model=%s input_chars=%d",
+                self._model,
+                len(markdown),
             )
+            started_at = perf_counter()
+            try:
+                response = await self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    max_tokens=self._max_tokens,
+                    response_format={"type": "json_object"},
+                )
+            except Exception:
+                logger.exception("Labeling request failed model=%s", self._model)
+                raise
         latency_ms = int((perf_counter() - started_at) * 1000)
 
         choices = getattr(response, "choices", None) or []
         if not choices:
+            logger.error("Labeling response had no choices model=%s", self._model)
             raise RuntimeError("OpenAI-compatible API returned no completion choices")
         raw_output = getattr(getattr(choices[0], "message", None), "content", None)
         if not isinstance(raw_output, str) or not raw_output.strip():
+            logger.error("Labeling response was empty model=%s", self._model)
             raise RuntimeError("OpenAI-compatible API returned an empty completion")
 
         usage = getattr(response, "usage", None)
@@ -87,7 +102,7 @@ class OpenAILabelingClient(LabelingClient):
             input=int(getattr(usage, "prompt_tokens", 0) or 0),
             output=int(getattr(usage, "completion_tokens", 0) or 0),
         )
-        return ExtractionResult(
+        result = ExtractionResult(
             raw_output=raw_output,
             model=self.model_name,
             token_usage=token_usage,
@@ -97,3 +112,14 @@ class OpenAILabelingClient(LabelingClient):
                 "finish_reason": str(getattr(choices[0], "finish_reason", "") or ""),
             },
         )
+        logger.info(
+            "Labeling request completed model=%s latency_ms=%d input_tokens=%d "
+            "output_tokens=%d response_id=%s finish_reason=%s",
+            result.model,
+            result.latency_ms,
+            result.token_usage.input,
+            result.token_usage.output,
+            result.metadata["provider_response_id"],
+            result.metadata["finish_reason"],
+        )
+        return result

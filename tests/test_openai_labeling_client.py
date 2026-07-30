@@ -45,7 +45,8 @@ class OpenAILabelingClientTests(unittest.IsolatedAsyncioTestCase):
             client=client,
         )
 
-        result = await labeling_client.label("not a recipe")
+        with self.assertLogs("labeling.clients.openai_client", level="INFO") as logs:
+            result = await labeling_client.label("not a recipe")
 
         self.assertEqual(result.raw_output, '{"dish": null, "reason": "not_a_recipe"}')
         self.assertEqual(result.model, "test-model")
@@ -53,6 +54,9 @@ class OpenAILabelingClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.token_usage.output, 7)
         self.assertEqual(result.metadata["provider_response_id"], "chatcmpl_test")
         self.assertEqual(result.metadata["finish_reason"], "stop")
+        self.assertIn("Dispatching labeling request model=test-model input_chars=12", logs.output[0])
+        self.assertIn("Labeling request completed model=test-model", logs.output[1])
+        self.assertIn("input_tokens=12 output_tokens=7", logs.output[1])
         self.assertEqual(completions.calls, [{
             "model": "test-model",
             "messages": [{"role": "user", "content": "not a recipe"}],
