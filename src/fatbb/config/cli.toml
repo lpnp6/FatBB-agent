@@ -1,9 +1,13 @@
 # Navigation labels and order for the interactive terminal UI.
 
+[cli]
+home_page = "chat"
+palette_page = "palette"
+
 [menus.palette]
 items = [
-  { value = "knowledge_base", label = "Knowledge Base" },
-  { value = "back", label = "Back" },
+  { value = "knowledge_base", label = "Knowledge Base", handler = "fatbb.cli.actions:open_knowledge_base_menu" },
+  { value = "back", label = "Back", handler = "fatbb.cli.actions:return_to_chat" },
 ]
 
 [menus.knowledge_base]
@@ -38,26 +42,76 @@ handler = "fatbb.cli.item_sources:existing_knowledge_bases"
 
 [pages.palette]
 menu = "palette"
+interaction = "menu"
+submit_action = "palette_selection"
+
+[pages.chat]
+interaction = "chat"
+submit_action = "retrieve"
 
 [pages.knowledge_base_menu]
 menu = "knowledge_base"
+interaction = "menu"
+submit_action = "knowledge_base_menu_selection"
 
 [pages.existing_knowledge_bases]
 item_source = "existing_knowledge_bases"
+interaction = "menu"
+submit_action = "select_knowledge_base"
 
 [pages.retrieval_type]
 menu = "retrieval_type"
+interaction = "menu"
+submit_action = "set_retrieval_type"
 
 [pages.database_type]
 menu = "database_type"
+interaction = "menu"
+submit_action = "set_database_type"
+
+[pages.database_url]
+interaction = "text"
+submit_action = "set_database_url"
+hint = "Enter a database connection URL. It will be stored with the knowledge base."
 
 [pages.source_type]
 menu = "source_type"
+interaction = "menu"
+submit_action = "set_source_type"
+
+[pages.knowledge_base_name]
+interaction = "text"
+submit_action = "set_knowledge_base_name"
+hint = "Enter a knowledge base name."
+
+[pages.source_path]
+interaction = "text"
+submit_action = "create_knowledge_base"
+
+[routes]
+open_knowledge_base_menu = "knowledge_base_menu"
+open_existing_knowledge_bases = "existing_knowledge_bases"
+open_knowledge_base_creation = "retrieval_type"
+existing_knowledge_bases_back = "knowledge_base_menu"
+knowledge_base_name_next = "source_path"
+database_url_next = "source_type"
+retrieval_type = "retrieval_type"
+retrieval_type_back = "knowledge_base_menu"
+retrieval_type_next = "database_type"
+database_type = "database_type"
+database_type_back = "retrieval_type"
+database_type_next = "database_url"
+source_type = "source_type"
+source_type_back = "database_url"
+source_type_next = "knowledge_base_name"
 
 # State-machine action names are mapped to trusted, source-controlled handler
 # functions. The controller imports these paths only when an action is raised.
 [actions.knowledge_base_menu_selection]
 menu = "knowledge_base_menu"
+
+[actions.palette_selection]
+menu = "palette"
 
 [actions.select_knowledge_base]
 handler = "fatbb.cli.actions:select_knowledge_base"

@@ -14,7 +14,7 @@ from fatbb.domain.knowledge_base import KnowledgeBase
 
 from .config import CliConfig
 from .events import InputChanged, Key, KeyPressed
-from .state import Screen, UiState
+from .state import UiState
 from .update import Transition, update
 
 
@@ -25,7 +25,7 @@ class CliController:
         """Initialize the controller with the application service it orchestrates."""
         self._service = service
         self._config = config
-        self.state = UiState()
+        self.state = UiState(screen=config.home_page)
         self._app: object = None
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._indexing_lock = threading.Lock()
@@ -67,10 +67,10 @@ class CliController:
 
     def items(self) -> tuple[str, ...]:
         """Resolve the active page's configured item source."""
-        choices = self._config.menu_items(self.state.screen.value)
+        choices = self._config.menu_items(self.state.screen)
         if choices is not None:
             return tuple(cast(str, choice.label) for choice in choices)
-        source = self._config.item_source(self.state.screen.value)
+        source = self._config.item_source(self.state.screen)
         if source is None:
             return ()
         module_name, function_name = source.handler.split(":", maxsplit=1)
@@ -86,13 +86,33 @@ class CliController:
 
     def on_input_changed(self, text: str) -> None:
         """Update the state machine after the user changes the text input."""
-        self._apply(update(self.state, InputChanged(text), item_count=len(self.items())))
+        self._apply(update(
+            self.state, InputChanged(text), page=self._config.page(self.state.screen),
+            home_page=self._config.home_page, palette_page=self._config.palette_page,
+            item_count=len(self.items()),
+        ))
 
     def on_key_pressed(self, key: Key) -> None:
         """Handle a keyboard event, including the terminal's Ctrl-D exit signal."""
         if key == "ctrl_d":
             raise EOFError
-        self._apply(update(self.state, KeyPressed(key), item_count=len(self.items())))
+        self._apply(update(
+            self.state, KeyPressed(key), page=self._config.page(self.state.screen),
+            home_page=self._config.home_page, palette_page=self._config.palette_page,
+            item_count=len(self.items()),
+        ))
+
+    def is_home_page(self) -> bool:
+        """Whether the active page is the configured chat/home page."""
+        return self.state.screen == self._config.home_page
+
+    def is_palette_page(self) -> bool:
+        """Whether the active page is the configured command palette."""
+        return self.state.screen == self._config.palette_page
+
+    def page_hint(self) -> str | None:
+        """Return the active page's optional presentation hint."""
+        return self._config.page(self.state.screen).hint
 
     def _apply(self, transition: Transition) -> None:
         """Commit a UI transition, then perform its optional application action."""

@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING
 
 from fatbb.domain.knowledge_base import KnowledgeBase
 
-from .state import Screen
-
 if TYPE_CHECKING:
     from .controller import CliController
 
@@ -20,19 +18,22 @@ _DATABASE_URL_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:(?://|\S+)")
 def open_existing_knowledge_bases(controller: CliController) -> None:
     """Load the local KB catalog before displaying the selection page."""
     controller._existing = controller._service.list()
-    controller.state = replace(
-        controller.state, screen=Screen.EXISTING_KNOWLEDGE_BASES, selected_index=0,
-    )
+    _show(controller, "open_existing_knowledge_bases")
 
 
 def open_knowledge_base_creation(controller: CliController) -> None:
     """Begin the configured knowledge-base creation flow."""
-    controller.state = replace(controller.state, screen=Screen.RETRIEVAL_TYPE, selected_index=0)
+    _show(controller, "open_knowledge_base_creation")
+
+
+def open_knowledge_base_menu(controller: CliController) -> None:
+    """Open the configured knowledge-base menu from the command palette."""
+    _show(controller, "open_knowledge_base_menu")
 
 
 def return_to_chat(controller: CliController) -> None:
     """Close a menu and return to the chat page."""
-    controller.state = replace(controller.state, screen=Screen.CHAT, selected_index=0)
+    controller.state = replace(controller.state, screen=controller._config.home_page, selected_index=0)
 
 
 def select_knowledge_base(controller: CliController, value: str | None) -> None:
@@ -40,9 +41,7 @@ def select_knowledge_base(controller: CliController, value: str | None) -> None:
     selected_index = int(value or "0")
     back_index = len(controller._existing) if controller._existing else 1
     if selected_index == back_index:
-        controller.state = replace(
-            controller.state, screen=Screen.KNOWLEDGE_BASE_MENU, input_text="", selected_index=0,
-        )
+        _show(controller, "existing_knowledge_bases_back")
         return
     if not controller._existing:
         controller.state = replace(controller.state, status="No knowledge bases are available.")
@@ -55,10 +54,8 @@ def set_knowledge_base_name(controller: CliController, value: str | None) -> Non
     name = value or ""
     if not name.strip():
         raise ValueError("Knowledge base name cannot be empty.")
-    controller.state = replace(
-        controller.state, screen=Screen.SOURCE_PATH, input_text="", pending_name=name.strip(),
-        status="Enter a local file or directory path.",
-    )
+    _show(controller, "knowledge_base_name_next", pending_name=name.strip(),
+          status="Enter a local file or directory path.")
 
 
 def set_database_url(controller: CliController, value: str | None) -> None:
@@ -82,66 +79,42 @@ def set_database_url(controller: CliController, value: str | None) -> None:
         ]
         if url_lines:
             database_url = url_lines[-1]
-            controller.state = replace(
-                controller.state, screen=Screen.SOURCE_TYPE, input_text="",
-                pending_database_url=database_url, selected_index=0,
-                status="URL extracted from multi-line paste.",
-            )
+            _show(controller, "database_url_next", pending_database_url=database_url,
+                  status="URL extracted from multi-line paste.")
             return
         # Fall back to collapsing all whitespace when no URI line is found.
         collapsed = " ".join(lines)
         if not collapsed:
             raise ValueError("Database URL cannot be empty.")
         database_url = collapsed
-        controller.state = replace(
-            controller.state, screen=Screen.SOURCE_TYPE, input_text="",
-            pending_database_url=database_url, selected_index=0,
-            status="URL whitespace was collapsed.",
-        )
+        _show(controller, "database_url_next", pending_database_url=database_url,
+              status="URL whitespace was collapsed.")
         return
-    controller.state = replace(
-        controller.state, screen=Screen.SOURCE_TYPE, input_text="",
-        pending_database_url=database_url, selected_index=0,
-    )
+    _show(controller, "database_url_next", pending_database_url=database_url)
 
 
 def set_retrieval_type(controller: CliController, value: str | None) -> None:
-    choices = controller._config.menu_items(Screen.RETRIEVAL_TYPE.value) or ()
+    choices = controller._config.menu_items(controller._config.route("retrieval_type")) or ()
     if choices[int(value or "0")].value == "back":
-        controller.state = replace(
-            controller.state, screen=Screen.KNOWLEDGE_BASE_MENU, input_text="", selected_index=0,
-        )
+        _show(controller, "retrieval_type_back")
         return
-    controller.state = replace(
-        controller.state, pending_retrieval_type=choices[int(value or "0")].value,
-        screen=Screen.DATABASE_TYPE, selected_index=0,
-    )
+    _show(controller, "retrieval_type_next", pending_retrieval_type=choices[int(value or "0")].value)
 
 
 def set_database_type(controller: CliController, value: str | None) -> None:
-    choices = controller._config.menu_items(Screen.DATABASE_TYPE.value) or ()
+    choices = controller._config.menu_items(controller._config.route("database_type")) or ()
     if choices[int(value or "0")].value == "back":
-        controller.state = replace(
-            controller.state, screen=Screen.RETRIEVAL_TYPE, input_text="", selected_index=0,
-        )
+        _show(controller, "database_type_back")
         return
-    controller.state = replace(
-        controller.state, pending_database_type=choices[int(value or "0")].value,
-        screen=Screen.DATABASE_URL, input_text="", selected_index=0,
-    )
+    _show(controller, "database_type_next", pending_database_type=choices[int(value or "0")].value)
 
 
 def set_source_type(controller: CliController, value: str | None) -> None:
-    choices = controller._config.menu_items(Screen.SOURCE_TYPE.value) or ()
+    choices = controller._config.menu_items(controller._config.route("source_type")) or ()
     if choices[int(value or "0")].value == "back":
-        controller.state = replace(
-            controller.state, screen=Screen.DATABASE_URL, input_text="", selected_index=0,
-        )
+        _show(controller, "source_type_back")
         return
-    controller.state = replace(
-        controller.state, pending_source_type=choices[int(value or "0")].value,
-        screen=Screen.KNOWLEDGE_BASE_NAME, input_text="", selected_index=0,
-    )
+    _show(controller, "source_type_next", pending_source_type=choices[int(value or "0")].value)
 
 
 def create_knowledge_base(controller: CliController, value: str | None) -> None:
@@ -225,7 +198,7 @@ def _activate(controller: CliController, knowledge_base: KnowledgeBase, status: 
     """Switch to chat with a knowledge base and clear transient UI content."""
     controller._active_knowledge_base = knowledge_base
     controller.state = replace(
-        controller.state, screen=Screen.CHAT, input_text="", selected_index=0,
+        controller.state, screen=controller._config.home_page, input_text="", selected_index=0,
         active_knowledge_base_id=knowledge_base.id,
         active_knowledge_base_name=knowledge_base.name, status=status, lines=(),
     )
@@ -242,3 +215,14 @@ def _format_evidence(item: object, index: int) -> str:
     content = " ".join(evidence.content.split())
     preview = content[:300] + ("…" if len(content) > 300 else "")
     return f"{index}. {source} · score {evidence.score:.2f}\n   {preview}"
+
+
+def _show(controller: CliController, route: str, **changes: object) -> None:
+    """Navigate through a TOML-defined route and reset transient input."""
+    controller.state = replace(
+        controller.state,
+        screen=controller._config.route(route),
+        input_text="",
+        selected_index=0,
+        **changes,
+    )

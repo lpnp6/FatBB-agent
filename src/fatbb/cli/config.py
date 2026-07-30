@@ -26,6 +26,15 @@ class Command:
         self.menu = menu
 
 
+class Page:
+    """A configured page and the interaction it accepts."""
+
+    def __init__(self, interaction: str, submit_action: str | None = None, hint: str | None = None):
+        self.interaction = interaction
+        self.submit_action = submit_action
+        self.hint = hint
+
+
 class CliConfig:
     """Read menu labels and ordering without mixing them with capabilities."""
 
@@ -33,6 +42,12 @@ class CliConfig:
         # Load the source-controlled TOML document once; the remaining blocks
         # validate and normalize each top-level configuration section.
         payload = tomllib.loads(path.read_text(encoding="utf-8"))
+
+        raw_cli = payload.get("cli")
+        if not isinstance(raw_cli, dict):
+            raise ValueError("CLI config requires a [cli] section.")
+        self.home_page = self._required_string(raw_cli, "home_page", "CLI config")
+        self.palette_page = self._required_string(raw_cli, "palette_page", "CLI config")
 
         # Parse [menus.*]. Each menu owns its static choices, including the
         # display label, stable value, and optional handler for that choice.
@@ -62,24 +77,48 @@ class CliConfig:
                 raise ValueError(f"CLI item source {name!r} requires a handler string.")
             self._item_sources[name] = ItemSource(handler)
 
-        # Parse [pages.*]. A page uses exactly one option source: either a
-        # static menu from [menus] or a dynamic provider from [item_sources].
+        # Parse [pages.*]. The page interaction and submit action let the
+        # reducer work with arbitrary page ids instead of a Python enum.
         raw_pages = payload.get("pages")
         if not isinstance(raw_pages, dict):
             raise ValueError("CLI config requires a [pages] section.")
         self._page_sources: dict[str, str] = {}
         self._page_menus: dict[str, str] = {}
+        self._pages: dict[str, Page] = {}
         for name, raw_page in raw_pages.items():
             if not isinstance(name, str) or not isinstance(raw_page, dict):
                 raise ValueError("Invalid CLI page configuration.")
             item_source = raw_page.get("item_source")
             menu = raw_page.get("menu")
+            interaction = self._required_string(raw_page, "interaction", f"CLI page {name!r}")
+            submit_action = raw_page.get("submit_action")
+            hint = raw_page.get("hint")
+            if submit_action is not None and not isinstance(submit_action, str):
+                raise ValueError(f"CLI page {name!r} submit_action must be a string.")
+            if hint is not None and not isinstance(hint, str):
+                raise ValueError(f"CLI page {name!r} hint must be a string.")
             if isinstance(item_source, str):
                 self._page_sources[name] = item_source
             elif isinstance(menu, str):
                 self._page_menus[name] = menu
-            else:
-                raise ValueError(f"CLI page {name!r} requires item_source or menu.")
+            elif interaction == "menu":
+                raise ValueError(f"CLI menu page {name!r} requires item_source or menu.")
+            self._pages[name] = Page(interaction, submit_action, hint)
+
+        for page_name in (self.home_page, self.palette_page):
+            if page_name not in self._pages:
+                raise ValueError(f"CLI config references unknown page: {page_name}")
+
+        raw_routes = payload.get("routes")
+        if not isinstance(raw_routes, dict):
+            raise ValueError("CLI config requires a [routes] section.")
+        self._routes: dict[str, str] = {}
+        for name, target in raw_routes.items():
+            if not isinstance(name, str) or not isinstance(target, str):
+                raise ValueError("CLI routes must map string names to page ids.")
+            if target not in self._pages:
+                raise ValueError(f"CLI route {name!r} targets unknown page: {target}")
+            self._routes[name] = target
 
         # Parse [actions.*]. An action either invokes a handler directly or
         # resolves the selected choice from a configured menu before invoking
@@ -117,6 +156,27 @@ class CliConfig:
     def action(self, name: str) -> Command | None:
         """Return the configuration definition for one state-machine action."""
         return self._actions.get(name)
+
+    def page(self, name: str) -> Page:
+        """Return one configured page, rejecting invalid navigation targets."""
+        try:
+            return self._pages[name]
+        except KeyError as error:
+            raise ValueError(f"Unknown CLI page: {name}") from error
+
+    def route(self, name: str) -> str:
+        """Resolve a semantic navigation route to its configured page id."""
+        try:
+            return self._routes[name]
+        except KeyError as error:
+            raise ValueError(f"Unknown CLI route: {name}") from error
+
+    @staticmethod
+    def _required_string(payload: dict[str, object], key: str, context: str) -> str:
+        value = payload.get(key)
+        if not isinstance(value, str):
+            raise ValueError(f"{context} requires a {key} string.")
+        return value
 
     @staticmethod
     def _choices(items: list[object], context: str) -> tuple[Command, ...]:

@@ -5,15 +5,18 @@ import unittest
 
 from prompt_toolkit.formatted_text import to_formatted_text
 
-from fatbb.cli.state import Screen, UiState
+from fatbb.cli.state import UiState
 from fatbb.cli.view import body, palette
 
 
 class CliViewTests(unittest.TestCase):
     def test_palette_hides_previous_chat_result_from_modal_body(self) -> None:
         controller = SimpleNamespace(
-            state=UiState(screen=Screen.PALETTE, input_text="/", lines=("Previous result",)),
+            state=UiState(screen="palette", input_text="/", lines=("Previous result",)),
             items=lambda: ("Knowledge Base",),
+            is_home_page=lambda: False,
+            is_palette_page=lambda: True,
+            page_hint=lambda: None,
         )
 
         chat_text = _plain_text(body(controller))

@@ -20,7 +20,6 @@ from fatbb.infrastructure.local.local import Local
 
 from .controller import CliController
 from .config import CliConfig
-from .state import Screen
 from .view import body, header, palette, prompt
 
 
@@ -150,7 +149,7 @@ def main() -> None:
                 Float(
                     content=ConditionalContainer(
                         command_palette,
-                        filter=Condition(lambda: controller.state.screen is Screen.PALETTE),
+                        filter=Condition(controller.is_palette_page),
                     ),
                     # Header is one row; separator + prompt consume two rows
                     # at the bottom. Fill everything between them.

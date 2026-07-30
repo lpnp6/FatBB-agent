@@ -5,7 +5,6 @@ from __future__ import annotations
 from prompt_toolkit.formatted_text import HTML
 
 from .controller import CliController
-from .state import Screen
 
 
 def header(controller: CliController) -> HTML:
@@ -20,18 +19,16 @@ def body(controller: CliController) -> HTML:
     # retrieval results in state, but do not append a new menu beneath them.
     # Returning to CHAT makes the unchanged transcript visible again.
     parts: list[str] = []
-    if state.screen is Screen.CHAT:
-        parts.append(state.status) 
+    if controller.is_home_page():
+        parts.append(state.status)
         if state.progress:
             parts.append(f"  {state.progress}")
         if state.lines:
             parts.extend(("", *state.lines))
-    if controller.items() and state.screen is not Screen.PALETTE:
+    if controller.items() and not controller.is_palette_page():
         parts.extend(("", _menu_text(controller)))
-    if state.screen is Screen.KNOWLEDGE_BASE_NAME:
-        parts.append("Enter a knowledge base name.")
-    if state.screen is Screen.DATABASE_URL:
-        parts.append("Enter a database connection URL. It will be stored with the knowledge base.")
+    if hint := controller.page_hint():
+        parts.append(hint)
     return HTML("\n".join(_escape(part) for part in parts))
 
 
