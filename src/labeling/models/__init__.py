@@ -15,7 +15,7 @@ from .enums import (
     StorageType,
     UmamiLevel,
 )
-from .dish import Dish, CookingStep, CuisineRef, RelatedDish
+from .dish import Dish, CookingStep, CuisineRef, DishRelation
 from .ingredient import Ingredient, AmountNormalized, IngredientRelation
 from .extraction import ExtractionOutput, LabelResult, ValidationResult
 
@@ -41,7 +41,7 @@ __all__ = [
     "Dish",
     "CookingStep",
     "CuisineRef",
-    "RelatedDish",
+    "DishRelation",
     # Ingredient
     "Ingredient",
     "AmountNormalized",

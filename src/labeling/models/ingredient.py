@@ -70,8 +70,8 @@ class IngredientRelation:
     Per schema-design.md §5.5 and §8 ingredient_relations format.
     """
 
-    from_ingredient: str  # Ingredient name or slug
-    to_ingredient: str  # Ingredient name or slug
+    from_ingredient: str  # Canonical ingredient slug
+    to_ingredient: str  # Canonical ingredient slug
     relation: str  # "complements" | "substitutes" | "makes"
 
     # COMPLEMENTS fields

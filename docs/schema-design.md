@@ -563,14 +563,7 @@ The fine-tuned model takes a food page (Markdown, any language) and outputs the 
       "name": "Sichuan Cuisine",
       "confidence": 0.95,
       "is_primary": true
-    },
-    "related_dishes": [
-      {
-        "name": "Kung Pao Shrimp",
-        "relation": "variant_of",
-        "variant_type": "ingredient_sub"
-      }
-    ]
+    }
   },
   "ingredients": [
     {
@@ -597,6 +590,26 @@ The fine-tuned model takes a food page (Markdown, any language) and outputs the 
       "is_essential": true,
       "preparation": "Cut into sections"
     }
+  ],
+  "dish_relations": [
+    {
+      "from_dish": "kung-pao-chicken",
+      "to_dish": "kung-pao-shrimp",
+      "relation": "variant_of",
+      "variant_type": "ingredient_sub",
+      "context": null,
+      "note": null
+    }
+  ],
+  "ingredient_relations": [
+    {
+      "from_ingredient": "sichuan-peppercorn",
+      "to_ingredient": "dried-chili",
+      "relation": "complements",
+      "strength": "classic",
+      "context": "adds_numbing_and_aroma",
+      "note": "The numbing of Sichuan peppercorn and dried chili form the core of Sichuan mala flavor."
+    }
   ]
 }
 ```
@@ -605,10 +618,10 @@ The fine-tuned model takes a food page (Markdown, any language) and outputs the 
 
 | LLM Output Path | Graph Target |
 |-----------------|--------------|
-| `dish.*` (excluding cuisine/related_dishes/ingredients) | Dish node properties |
+| `dish.*` (excluding cuisine/ingredients) | Dish node properties |
 | `dish.cuisine` + `dish.name` | `(Dish)-[:BELONGS_TO {confidence}]->(Cuisine)` |
 | `ingredients[]` | `(Ingredient)` nodes + `(Dish)-[:CONTAINS {amount,...}]->(Ingredient)` |
-| `dish.related_dishes[]` | `(Dish)-[:VARIANT_OF {type}]->(Dish)` |
+| `dish_relations[]` | `(Dish)-[:VARIANT_OF {variant_type, note}]->(Dish)` or `(Dish)-[:PAIRS_WITH {context}]->(Dish)` |
 | `dish.cooking_steps[]` | `cooking_steps` property on Dish node |
 | `dish.cooking_steps[].ingredient_refs[]` | References Ingredient by id, linked to `ingredients[].name` |
 | `ingredient_relations[]` | `(Ingredient)-[:COMPLEMENTS | SUBSTITUTES | MAKES]->(Ingredient)` |
@@ -619,24 +632,24 @@ The fine-tuned model takes a food page (Markdown, any language) and outputs the 
 {
   "ingredient_relations": [
     {
-      "from": "sichuan-peppercorn",
-      "to": "dried-chili",
+      "from_ingredient": "sichuan-peppercorn",
+      "to_ingredient": "dried-chili",
       "relation": "complements",
       "strength": "classic",
       "context": "adds_numbing_and_aroma",
       "note": "The numbing of Sichuan peppercorn and the heat of dried chili form the core of Sichuan mala flavor profile"
     },
     {
-      "from": "chicken-breast",
-      "to": "chicken-thigh",
+      "from_ingredient": "chicken-breast",
+      "to_ingredient": "chicken-thigh",
       "relation": "substitutes",
       "direction": "bidirectional",
       "impact": "minimal",
       "condition": "similar_texture_same_poultry_family"
     },
     {
-      "from": "soybean",
-      "to": "tofu",
+      "from_ingredient": "soybean",
+      "to_ingredient": "tofu",
       "relation": "makes",
       "process": "soaking→grinding→boiling→coagulation→molding",
       "is_reversible": false

@@ -30,12 +30,15 @@ class CuisineRef:
 
 
 @dataclass
-class RelatedDish:
-    """A variant-of or related-dish reference."""
+class DishRelation:
+    """A standalone Dish-to-Dish graph relationship from model output."""
 
-    name: str
-    relation: str  # "variant_of" is primary; extendable
+    from_dish: str
+    to_dish: str
+    relation: str  # "variant_of" | "pairs_with"
     variant_type: VariantType | None = None
+    context: str | None = None
+    note: str | None = None
 
 
 @dataclass
@@ -74,6 +77,5 @@ class Dish:
     source_urls: list[str] = field(default_factory=list)
     confidence: float | None = None
 
-    # Embedded relations (resolved to nodes + edges in mapping layer)
+    # Embedded relation (resolved to an edge in the mapping layer)
     cuisine: CuisineRef | None = None
-    related_dishes: list[RelatedDish] = field(default_factory=list)

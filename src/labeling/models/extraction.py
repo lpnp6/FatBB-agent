@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .common import ExtractionResult, TokenUsage
-from .dish import Dish
+from .dish import Dish, DishRelation
 from .ingredient import Ingredient, IngredientRelation
 
 
@@ -25,8 +25,8 @@ class ExtractionOutput:
     ingredient_relations: list[IngredientRelation] = field(default_factory=list)
     """Inter-ingredient relationships (complements, substitutes, makes)."""
 
-    has_ingredient_relations: bool = False
-    """True if ingredient_relations were explicitly detected and extracted."""
+    dish_relations: list[DishRelation] = field(default_factory=list)
+    """Dish relationships (variant_of, pairs_with) outside the Dish node."""
 
 
 @dataclass

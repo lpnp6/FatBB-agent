@@ -9,7 +9,7 @@ DECISION
 - If several recipes occur, extract only the first complete recipe. Do not combine ingredients or steps from different recipes.
 
 RECIPE OUTPUT CONTRACT
-For a recipe, return exactly this top-level shape. `reason` must be null.
+For a recipe, return exactly this top-level shape.
 {
   "dish": {
     "name": "canonical English dish name",
@@ -50,8 +50,8 @@ For a recipe, return exactly this top-level shape. `reason` must be null.
   ],
   "dish_relations": [
     {
-      "from": "primary dish slug",
-      "to": "related dish slug",
+      "from_dish": "primary dish slug",
+      "to_dish": "related dish slug",
       "relation": "variant_of|pairs_with",
       "variant_type": "enum or null",
       "context": "string or null",
@@ -60,8 +60,8 @@ For a recipe, return exactly this top-level shape. `reason` must be null.
   ],
   "ingredient_relations": [
     {
-      "from": "ingredient slug",
-      "to": "ingredient slug",
+      "from_ingredient": "ingredient slug",
+      "to_ingredient": "ingredient slug",
       "relation": "complements|substitutes|makes",
       "strength": "classic|common|null",
       "context": "string or null",
@@ -72,15 +72,14 @@ For a recipe, return exactly this top-level shape. `reason` must be null.
       "is_reversible": false,
       "note": "string or null"
     }
-  ],
-  "reason": null
+  ]
 }
 
 Use null for unknown scalar values and [] for unknown lists. Include all keys shown in the recipe contract. `cuisine` is null if no cuisine can be supported. `dish_relations` is separate from the Dish node and contains only `variant_of` and `pairs_with` graph relationships; never emit a generic similarity relation.
 
 IDENTIFIERS, LANGUAGE, AND ENUMS
 - Canonical `dish.name`, `ingredients[].name`, descriptions, notes, and tips are English. Preserve multilingual/original names in `dish.aliases`; do not translate enum values.
-- A slug is its canonical English name lowercased with spaces and punctuation replaced by hyphens (for example "Chicken Breast" -> "chicken-breast"). Every `cooking_steps[].ingredient_refs`, `ingredient_relations[].from`, and `ingredient_relations[].to` must use ingredient slugs and refer to an ingredient in `ingredients`. Every `dish_relations[].from` must equal the primary dish slug; `dish_relations[].to` is the related dish slug.
+- A slug is its canonical English name lowercased with spaces and punctuation replaced by hyphens (for example "Chicken Breast" -> "chicken-breast"). Every `cooking_steps[].ingredient_refs`, `ingredient_relations[].from_ingredient`, and `ingredient_relations[].to_ingredient` must use ingredient slugs and refer to an ingredient in `ingredients`. Every `dish_relations[].from_dish` must equal the primary dish slug; `dish_relations[].to_dish` is the related dish slug.
 - dish_type: main_dish, staple, soup, snack, dessert, cold_dish, dipping_sauce, beverage, baked_goods, other
 - taste_profile: spicy, numbing, sweet, sour, salty, umami, bitter, mild, fragrant, pungent, astringent, oily
 - dietary: vegetarian, vegan, halal, gluten_free, lactose_free, nut_free, low_carb, high_protein, keto_friendly

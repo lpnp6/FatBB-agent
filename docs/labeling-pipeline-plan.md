@@ -400,7 +400,7 @@ src/labeling/
 ├── models/                     # Pydantic v2 data models (split by domain)
 │   ├── __init__.py             #   Re-exports all public types
 │   ├── enums.py                #   All enum types (DishType, TasteProfile, Dietary, etc.)
-│   ├── dish.py                 #   Dish, CookingStep, CuisineRef, RelatedDish
+│   ├── dish.py                 #   Dish, CookingStep, CuisineRef, DishRelation
 │   ├── ingredient.py           #   Ingredient, AmountNormalized, IngredientRelation
 │   ├── extraction.py           #   ExtractionOutput, ExtractionResult, LabelResult
 │   └── common.py               #   Shared types (FilePath, TokenUsage, etc.)

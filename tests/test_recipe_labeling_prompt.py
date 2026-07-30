@@ -15,8 +15,9 @@ class RecipeLabelingPromptBuilderTests(unittest.TestCase):
 
         self.assertEqual([message["role"] for message in messages], ["system", "user"])
         self.assertIn('"reason":"not_a_recipe"', messages[0]["content"])
-        self.assertIn('"from": "ingredient slug"', messages[0]["content"])
+        self.assertIn('"from_ingredient": "ingredient slug"', messages[0]["content"])
         self.assertIn('"dish_relations": [', messages[0]["content"])
+        self.assertIn('"from_dish": "primary dish slug"', messages[0]["content"])
         self.assertIn('"relation": "variant_of|pairs_with"', messages[0]["content"])
         self.assertIn("COMPLEMENTS requires an especially meaningful pairing", messages[0]["content"])
         self.assertIn('"Chicken Breast" -> "chicken-breast"', messages[0]["content"])
