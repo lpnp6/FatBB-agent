@@ -24,7 +24,7 @@ def body(controller: CliController) -> HTML:
     if state.screen is Screen.KNOWLEDGE_BASE_NAME:
         parts.append("Enter a knowledge base name.")
     if state.screen is Screen.DATABASE_URL:
-        parts.append("Enter a PostgreSQL connection URL. It will be stored with the knowledge base.")
+        parts.append("Enter a database connection URL. It will be stored with the knowledge base.")
     return HTML("\n".join(_escape(part) for part in parts))
 
 

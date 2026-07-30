@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "psycopg[binary]>=3.2,<4",
     "prompt-toolkit>=3.0,<4",
+    "tqdm>=4.66,<5",
 ]
 
 [project.scripts]

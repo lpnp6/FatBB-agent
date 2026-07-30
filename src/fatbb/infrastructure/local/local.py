@@ -22,7 +22,7 @@ class _LocalCatalog(TypedDict):
 class Local:
     """Own local CLI persistence, beginning with the knowledge-base catalog.
 
-    A knowledge base's PostgreSQL URL can include credentials, so its catalog
+    A knowledge base's database URL can include credentials, so its catalog
     is created with owner-only permissions on POSIX systems. Future local
     concerns, such as conversation history, belong here as separate files and
     methods on the same local-storage facade.
@@ -76,7 +76,7 @@ class Local:
         The temporary file is created beside the destination, then renamed with
         ``os.replace`` so a crash cannot leave a partially-written catalog.
         Both the directory and final file are owner-only on POSIX systems,
-        because a PostgreSQL URL may contain credentials.
+        because a database URL may contain credentials.
         """
         self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:

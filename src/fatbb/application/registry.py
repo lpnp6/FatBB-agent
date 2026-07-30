@@ -122,7 +122,11 @@ class CapabilityRegistry:
             ) from error
         # Protocols are structural and cannot be used as a runtime isinstance
         # check; verify the minimal method surface expected by each caller.
-        required = ("indexer", "retriever") if expected_type is KnowledgeBaseAdapter else ("load",)
+        required = (
+            ("check_connection", "indexer", "retriever")
+            if expected_type is KnowledgeBaseAdapter
+            else ("load",)
+        )
         if not all(callable(getattr(adapter, name, None)) for name in required):
             raise RuntimeError(f"Capability {definition.key!r} does not implement its required adapter port.")
         return adapter

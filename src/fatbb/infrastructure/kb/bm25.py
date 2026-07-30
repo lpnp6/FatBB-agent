@@ -11,6 +11,10 @@ from rag.stores import PostgresTextChunkStore
 class PostgresBm25KnowledgeBase:
     type = "bm25"
 
+    def check_connection(self, database_url: str) -> None:
+        """Verify PostgreSQL is reachable before source files are read."""
+        PostgresTextChunkStore(database_url).check_connection()
+
     def indexer(self, database_url: str) -> BM25Indexer:
         return BM25Indexer(MarkdownChunker(), PostgresTextChunkStore(database_url))
 

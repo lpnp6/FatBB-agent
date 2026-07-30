@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from prompt_toolkit.application import Application
@@ -21,6 +22,21 @@ from .controller import CliController
 from .config import CliConfig
 from .state import Screen
 from .view import body, header, palette, prompt
+
+
+def _configure_logging() -> None:
+    """Write operational logs to a local file without disturbing the terminal UI."""
+    logger = logging.getLogger()
+    if any(isinstance(handler, logging.FileHandler) for handler in logger.handlers):
+        return
+    log_directory = Path.home() / ".fatbb"
+    log_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    handler = logging.FileHandler(log_directory / "fatbb.log", encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    ))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 
 def build_controller() -> CliController:
@@ -50,6 +66,7 @@ def build_controller() -> CliController:
 
 def main() -> None:
     """Create the prompt-toolkit runtime and bridge terminal events to the controller."""
+    _configure_logging()
     controller = build_controller()
     app: Application[None]
     syncing = False

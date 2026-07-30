@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,9 @@ from .state import Screen
 
 if TYPE_CHECKING:
     from .controller import CliController
+
+
+_DATABASE_URL_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:(?://|\S+)")
 
 
 def open_existing_knowledge_bases(controller: CliController) -> None:
@@ -54,7 +58,7 @@ def set_database_url(controller: CliController, value: str | None) -> None:
     """Store a database URL while building a new knowledge base."""
     database_url = (value or "").strip()
     if not database_url:
-        raise ValueError("PostgreSQL URL cannot be empty.")
+        raise ValueError("Database URL cannot be empty.")
     # Terminal pastes on Windows can introduce CRLF line endings, and
     # accidental multi-line clipboard content can embed the database name
     # before the URL. Extract the intended single-line connection string.
@@ -63,10 +67,11 @@ def set_database_url(controller: CliController, value: str | None) -> None:
             line.strip()
             for line in database_url.replace("\r", "\n").split("\n")
         ]
-        # Prefer a line that looks like a PostgreSQL connection URI.
+        # Prefer a line that looks like a database connection URI. This
+        # supports registered database backends beyond PostgreSQL.
         url_lines = [
             line for line in lines
-            if line.startswith("postgresql://") or line.startswith("postgres://")
+            if _DATABASE_URL_PATTERN.match(line)
         ]
         if url_lines:
             database_url = url_lines[-1]
@@ -79,7 +84,7 @@ def set_database_url(controller: CliController, value: str | None) -> None:
         # Fall back to collapsing all whitespace when no URI line is found.
         collapsed = " ".join(lines)
         if not collapsed:
-            raise ValueError("PostgreSQL URL cannot be empty.")
+            raise ValueError("Database URL cannot be empty.")
         database_url = collapsed
         controller.state = replace(
             controller.state, screen=Screen.SOURCE_TYPE, input_text="",

@@ -33,7 +33,7 @@ class KnowledgeBase:
     ``id`` is the opaque storage identity used as the metadata filter during
     retrieval. ``name`` is only the user-facing label and may therefore never
     be used to scope queries. ``source_path`` records the initial import
-    location so a future reindex workflow can reuse it. The PostgreSQL URL is
+    location so a future reindex workflow can reuse it. The database URL is
     stored in ``config`` because each knowledge base can use a different DB.
     """
 

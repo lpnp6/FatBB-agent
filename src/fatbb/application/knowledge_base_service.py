@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
 
 from rag.models.query import RetrievalQuery
@@ -12,11 +13,14 @@ from fatbb.domain.knowledge_base import KnowledgeBase, KnowledgeBaseConfig
 from fatbb.domain.ports import KnowledgeBaseRepository
 
 
+logger = logging.getLogger(__name__)
+
+
 class KnowledgeBaseService:
     """Coordinate knowledge-base persistence, ingestion, and retrieval.
 
     Knowledge-base configuration is persisted locally, while each knowledge
-    base supplies the PostgreSQL URL used by its retrieval adapter.
+    base supplies the database URL used by its retrieval adapter.
     """
 
     def __init__(self, repository: KnowledgeBaseRepository, registry: CapabilityRegistry):
@@ -41,7 +45,7 @@ class KnowledgeBaseService:
         if not normalized_name:
             raise ValueError("Knowledge base name cannot be empty.")
         if not database_url.strip():
-            raise ValueError("PostgreSQL URL cannot be empty.")
+            raise ValueError("Database URL cannot be empty.")
 
         # Capture adapter choices and the per-knowledge-base database URL.
         config = KnowledgeBaseConfig(
@@ -52,17 +56,40 @@ class KnowledgeBaseService:
             id=str(uuid4()), name=normalized_name, config=config, source_path=source_path
         )
 
+        adapter = self._registry.knowledge_base(config.retrieval_type, config.database_type)
+        logger.info(
+            "Checking database connection before creating knowledge base",
+            extra={"knowledge_base": knowledge_base.name, "database_type": config.database_type},
+        )
+        try:
+            adapter.check_connection(config.database_url)
+        except Exception as error:
+            logger.exception(
+                "Database connection check failed",
+                extra={"knowledge_base": knowledge_base.name, "database_type": config.database_type},
+            )
+            raise ValueError(
+                f"Could not connect to the configured {config.database_type} database."
+            ) from error
+
         # Importers attach the generated ID to each document for retrieval scoping.
+        logger.info("Loading source documents", extra={"knowledge_base": knowledge_base.name})
         importer = self._registry.importer(config.source_type)
         documents = importer.load(source_path, knowledge_base_id=knowledge_base.id)
         if not documents:
             raise ValueError("No supported files were found at the specified path.")
 
         # Index first; persist the entry only after its documents are searchable.
-        self._registry.knowledge_base(config.retrieval_type, config.database_type).indexer(
-            config.database_url
-        ).upsert_documents(documents)
+        logger.info(
+            "Indexing source documents",
+            extra={"knowledge_base": knowledge_base.name, "document_count": len(documents)},
+        )
+        adapter.indexer(config.database_url).upsert_documents(documents)
         self._repository.create_knowledge_base(knowledge_base)
+        logger.info(
+            "Knowledge base created",
+            extra={"knowledge_base": knowledge_base.name, "document_count": len(documents)},
+        )
         return knowledge_base
 
     def retrieve(self, knowledge_base: KnowledgeBase, question: str) -> list[Evidence]:

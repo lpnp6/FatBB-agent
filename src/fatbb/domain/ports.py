@@ -50,6 +50,9 @@ class KnowledgeBaseAdapter(Protocol):
     # Capability key, for example ``bm25`` or a future ``vector`` KB.
     type: str
 
+    def check_connection(self, database_url: str) -> None:
+        """Raise when this adapter cannot connect to its configured database."""
+
     def indexer(self, database_url: str) -> Indexer: ...
 
     def retriever(self, database_url: str) -> Retriever: ...

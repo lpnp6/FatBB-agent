@@ -5,10 +5,14 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 import json
+import logging
 
 from ..interfaces.stores import BM25SearchStore
 from ..models.common import SourceRef
 from ..models.document import ScoredTextChunk, TextChunk
+
+
+logger = logging.getLogger(__name__)
 
 
 class PostgresTextChunkStore(BM25SearchStore):
@@ -24,6 +28,17 @@ class PostgresTextChunkStore(BM25SearchStore):
         if not dsn:
             raise ValueError("dsn cannot be empty")
         self._dsn = dsn
+
+    def check_connection(self) -> None:
+        """Open and validate a PostgreSQL connection without changing data."""
+        logger.info("Checking PostgreSQL database connection")
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+        except Exception:
+            logger.exception("PostgreSQL database connection check failed")
+            raise
+        logger.info("PostgreSQL database connection verified")
 
     def list_chunks(self, *, filters: Mapping[str, object]) -> list[TextChunk]:
         query = (

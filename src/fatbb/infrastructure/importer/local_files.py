@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import logging
 from pathlib import Path
 
 from rag.models.common import SourceRef
 from rag.models.document import Document
+from tqdm import tqdm
+
+
+logger = logging.getLogger(__name__)
 
 
 class LocalFileImporter:
@@ -18,10 +23,13 @@ class LocalFileImporter:
         if not source_path.exists():
             raise ValueError(f"Path does not exist: {source_path}")
         paths = [source_path] if source_path.is_file() else sorted(source_path.rglob("*"))
+        supported_paths = [
+            item for item in paths
+            if item.is_file() and item.suffix.lower() in self._supported_suffixes
+        ]
+        logger.info("Loading local source files", extra={"file_count": len(supported_paths)})
         documents: list[Document] = []
-        for item in paths:
-            if not item.is_file() or item.suffix.lower() not in self._supported_suffixes:
-                continue
+        for item in tqdm(supported_paths, desc="Loading documents", unit="file"):
             try:
                 content = item.read_text(encoding="utf-8")
             except UnicodeDecodeError as error:
@@ -37,4 +45,5 @@ class LocalFileImporter:
                     metadata={"knowledge_base_id": knowledge_base_id},
                 )
             )
+        logger.info("Loaded local source documents", extra={"document_count": len(documents)})
         return documents

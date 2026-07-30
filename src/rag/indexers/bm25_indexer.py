@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import logging
+
+from tqdm import tqdm
 
 from ..interfaces.chunker import Chunker
 from ..interfaces.indexer import Indexer
 from ..interfaces.stores import BM25SearchStore
 from ..models.document import Document, TextChunk
+
+
+logger = logging.getLogger(__name__)
 
 
 class BM25Indexer(Indexer):
@@ -19,10 +25,12 @@ class BM25Indexer(Indexer):
 
     def upsert_documents(self, documents: Sequence[Document]) -> None:
         """Rebuild each document's chunks for the backend BM25 index."""
-        for document in documents:
+        logger.info("Upserting documents into BM25 index", extra={"document_count": len(documents)})
+        for document in tqdm(documents, desc="Upserting documents", unit="document"):
             chunks = self._chunker.chunk(document)
             self._validate_chunks(document, chunks)
             self._store.replace_document_chunks(document.id, chunks)
+        logger.info("Completed BM25 document upsert", extra={"document_count": len(documents)})
 
     def delete_documents(self, document_ids: Sequence[str]) -> None:
         """Remove indexed chunks for deleted source documents."""
