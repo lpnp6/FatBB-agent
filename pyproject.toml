@@ -25,3 +25,4 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 fatbb = ["config/*.toml"]
+labeling = ["prompts/*.txt"]
