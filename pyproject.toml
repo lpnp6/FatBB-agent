@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "FatBB knowledge-base retrieval CLI"
 requires-python = ">=3.11"
 dependencies = [
+    "openai>=1.0,<3",
     "psycopg[binary]>=3.2,<4",
     "prompt-toolkit>=3.0,<4",
     "tqdm>=4.66,<5",
