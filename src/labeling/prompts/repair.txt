@@ -78,10 +78,10 @@ RECIPE OUTPUT CONTRACT
 
 ENUM REFERENCE
 - dish_type: main_dish, staple, soup, snack, dessert, cold_dish, dipping_sauce, beverage, baked_goods, other
-- taste_profile: spicy, numbing, sweet, sour, salty, umami, savory, bitter, mild, fragrant, pungent, astringent, oily
+- taste_profile: spicy, numbing, sweet, sour, salty, umami, savory, bitter, mild, fragrant, pungent, astringent, oily, tangy
 - dietary: vegetarian, vegan, halal, gluten_free, lactose_free, nut_free, low_carb, high_protein, keto_friendly
 - ingredient category: meat, poultry, seafood, dairy_eggs, vegetable, fruit, mushroom_fungi, soy_products, grain, seasoning, oils_fats, nuts_seeds, medicinal_herbs, processed, other
-- cooking method: stir-fry, pan-fry, deep-fry, steam, boil, roast/bake, braise, stew, quick-fry, flash-fry, toss/mix, braise-in-sauce, smoke, instant-boil, bake, simmer, blanch, slow-cook, other
+- cooking method: stir-fry, pan-fry, deep-fry, steam, boil, roast/bake, braise, stew, quick-fry, flash-fry, toss/mix, braise-in-sauce, smoke, instant-boil, bake, simmer, blanch, slow-cook, grill, other
 - heat_level: high_heat, medium_high, medium_heat, medium_low, low_heat, simmer
 - variant_type: ingredient_sub, regional, regional_version, school_version, dietary, modern
 - difficulty: easy, medium, hard

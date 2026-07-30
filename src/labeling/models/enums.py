@@ -36,6 +36,7 @@ class TasteProfile(str, Enum):
     PUNGENT = "pungent"
     ASTRINGENT = "astringent"
     OILY = "oily"
+    TANGY = "tangy"
 
 
 class DietaryTag(str, Enum):
@@ -97,6 +98,7 @@ class CookingMethod(str, Enum):
     BLANCH = "blanch"
     SLOW_COOK = "slow-cook"
     OTHER = "other"
+    GRILL = "grill"
 
 
 class HeatLevel(str, Enum):
