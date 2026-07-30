@@ -20,6 +20,7 @@ class DishType(str, Enum):
     BEVERAGE = "beverage"
     BAKED_GOODS = "baked_goods"
     OTHER = "other"
+    SIDE_DISH = "side_dish"
 
 
 class TasteProfile(str, Enum):
@@ -38,6 +39,8 @@ class TasteProfile(str, Enum):
     OILY = "oily"
     TANGY = "tangy"
     SMOKY = "smoky"
+    CREAMY = "creamy"
+    SAVOURY = "savoury"
 
 
 class DietaryTag(str, Enum):
@@ -68,6 +71,7 @@ class IngredientCategory(str, Enum):
     MEDICINAL_HERBS = "medicinal_herbs"
     PROCESSED = "processed"
     OTHER = "other"
+    CONDIMENT = "condiment"
 
 
 class VariantType(str, Enum):
@@ -77,6 +81,7 @@ class VariantType(str, Enum):
     SCHOOL_VERSION = "school_version"
     DIETARY = "dietary"
     MODERN = "modern"
+    METHOD = "method"
 
 
 class CookingMethod(str, Enum):
@@ -100,6 +105,9 @@ class CookingMethod(str, Enum):
     SLOW_COOK = "slow-cook"
     OTHER = "other"
     GRILL = "grill"
+    MIX = "mix"
+    SAUTÉ = "sauté"
+    BROIL = "broil"
 
 
 class HeatLevel(str, Enum):
