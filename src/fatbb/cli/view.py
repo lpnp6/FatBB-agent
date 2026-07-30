@@ -16,11 +16,16 @@ def header(controller: CliController) -> HTML:
 
 def body(controller: CliController) -> HTML:
     state = controller.state
-    parts = [state.status]
-    if state.progress:
-        parts.append(f"  {state.progress}")
-    if state.lines:
-        parts.extend(("", *state.lines))
+    # Menus and creation pages are modal over the chat transcript. Keep prior
+    # retrieval results in state, but do not append a new menu beneath them.
+    # Returning to CHAT makes the unchanged transcript visible again.
+    parts: list[str] = []
+    if state.screen is Screen.CHAT:
+        parts.append(state.status) 
+        if state.progress:
+            parts.append(f"  {state.progress}")
+        if state.lines:
+            parts.extend(("", *state.lines))
     if controller.items() and state.screen is not Screen.PALETTE:
         parts.extend(("", _menu_text(controller)))
     if state.screen is Screen.KNOWLEDGE_BASE_NAME:

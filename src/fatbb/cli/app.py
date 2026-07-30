@@ -125,7 +125,8 @@ def main() -> None:
         event.app.exit()
 
     # The chat surface always remains mounted. The slash-command palette is a
-    # floating overlay so opening it does not replace or erase conversation.
+    # floating overlay that covers the entire body, while the header and input
+    # remain visible and the previous transcript stays preserved in state.
     chat = HSplit(
         [
             Window(FormattedTextControl(lambda: header(controller)), height=1),
@@ -140,9 +141,6 @@ def main() -> None:
     )
     command_palette = Window(
         FormattedTextControl(lambda: palette(controller)),
-        height=Dimension.exact(5),
-        width=Dimension.exact(44),
-        style="bg:#303030 #ffffff",
         wrap_lines=True,
     )
     layout = Layout(
@@ -154,8 +152,12 @@ def main() -> None:
                         command_palette,
                         filter=Condition(lambda: controller.state.screen is Screen.PALETTE),
                     ),
-                    top=2,
-                    left=2,
+                    # Header is one row; separator + prompt consume two rows
+                    # at the bottom. Fill everything between them.
+                    top=1,
+                    bottom=2,
+                    left=0,
+                    right=0,
                     hide_when_covering_content=False,
                     transparent=False,
                     z_index=1,
