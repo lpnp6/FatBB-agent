@@ -136,7 +136,7 @@ class MemoryDedupStore(DedupStore):
 
 **SimHashDedupStore** uses a 64-bit SimHash fingerprint + Hamming distance threshold (default 3, ~95%+ similarity). The 64-bit hash is partitioned into 4 blocks of 16 bits (threshold + 1). By the pigeonhole principle, two hashes within distance 3 MUST share at least one identical block. This enables O(1) candidate lookup via a `(block_id, block_value)` index instead of an O(n) full-table scan. Average bucket size = N / 65536 rows; at 100k entries, ~1.5 candidates per lookup.
 
-**Storage**: SQLite file at `data/dedup_store.db`. Lightweight (~1KB per 1000 entries). The same store is used during bootstrap labeling AND production auto-labeling — preventing both duplicate API costs and duplicate training data.
+**Storage**: SQLite file at `src/labeling/dedup/dedup_store.db`. Lightweight (~1KB per 1000 entries). The same store is used during bootstrap labeling AND production auto-labeling — preventing both duplicate API costs and duplicate training data.
 
 Expected dedup: ~200-400 files removed from the raw corpus before model calls.
 
@@ -163,12 +163,12 @@ File lifecycle states:
 ```
 
 ```python
-# src/labeling/checkpoint.py
+# src/labeling/bootstrap/checkpoint.py
 
 class CheckpointManager:
     """Tracks labeling progress and enables crash-safe resume.
     
-    Persisted to data/checkpoint.json, atomically written after each file.
+    Persisted to data/bootstrap/checkpoint.json, atomically written after each file.
     Same checkpoint system works for bootstrap (Claude API) and production
     (local model) — the client backend is irrelevant to progress tracking.
     """
@@ -198,7 +198,7 @@ class CheckpointManager:
 
 
 # Usage in orchestrator — resume-safe loop
-checkpoint = CheckpointManager(Path("data/checkpoint.json"))
+checkpoint = CheckpointManager(Path("data/bootstrap/checkpoint.json"))
 state = checkpoint.load()
 
 # Resume: skip already-completed files
@@ -209,29 +209,58 @@ for entry in manifest:
     checkpoint.mark_in_flight(entry.slug)
     try:
         result = await label_one(entry, client, validator, scorer)
-            # The structured record must be durable before this hash is
-            # accepted, otherwise a crash could permanently skip training data.
-            append_jsonl(result, "data/training/bootstrap.jsonl")
-            dedup_store.update_status(entry.recipe_card_hash, HashStatus.ACCEPTED)
-            checkpoint.mark_completed(entry.slug, result)
+        # The structured record must be durable before this hash is
+        # accepted, otherwise a crash could permanently skip training data.
+        append_jsonl(result, "data/bootstrap/training.jsonl")
+        dedup_store.update_status(entry.recipe_card_hash, HashStatus.ACCEPTED)
+        checkpoint.mark_completed(entry.slug, result)
     except Exception as e:
         checkpoint.mark_failed(entry.slug, str(e))
 
 # After crash: re-run the same command, only pending/in_flight/failed files are processed
 ```
 
+**Storage location and format**: the orchestrator writes
+`data/bootstrap/checkpoint.json` atomically after every state transition. It stores
+operational state only; structured extraction data belongs in
+`data/bootstrap/training.jsonl`.
+
+```json
+{
+  "version": 1,
+  "manifest_path": "data/bootstrap/manifest.jsonl",
+  "output_path": "data/bootstrap/training.jsonl",
+  "created_at": "2026-07-30T10:00:00Z",
+  "updated_at": "2026-07-30T10:03:14Z",
+  "items": {
+    "labeling:corpus:recipes/lemon-pasta.md": {
+      "status": "completed",
+      "attempts": 1,
+      "recipe_card_hash": "0123456789abcdef",
+      "updated_at": "2026-07-30T10:03:14Z",
+      "output_line": 17,
+      "error": null
+    }
+  }
+}
+```
+
+`status` is one of `pending`, `in_flight`, `completed`, `failed`, or `skipped`.
+`output_line` is set only after the corresponding JSONL record is durable;
+failed records retain the final error message and retry count.
+
 **Why this matters for both phases**:
 - **Bootstrap**: 500 files x $0.01-0.02/API call = $5-10. A crash at file #498 without checkpoint wastes $5. With checkpoint: resume from #499, 2 seconds.
 - **Production**: 5,000+ files, local GPU inference. A power outage at file #4,500 without checkpoint wastes hours of GPU time. With checkpoint: resume from #4,501.
 
-### Stratification Dimensions
+### Sampling Dimensions
 
-- **Domain**: ~40% recipetineats, ~60% wellplated (matches corpus)
-- **Dish type**: main_dish, baked_goods, dessert, soup, snack, salad, beverage (inferred from filename heuristics)
-- **Complexity**: simple (<=5 ingredients), medium (6-12), complex (>=13)
-- **Source variant**: prefer wprm_print -> fall back to full_page
+- **Input root**: scan one configured Markdown source directory recursively.
+- **Deduplication**: SimHash clusters are formed before sampling; one document per cluster may enter a split.
+- **Holdout**: reserve 50 clusters before selecting the 500 labeling documents.
+- **No heuristic buckets**: filename, dish-type, and complexity rules do not affect eligibility or sampling.
 
-Output: `data/samples/manifest.jsonl`
+Output: `data/bootstrap/manifest.jsonl`
 
 ### Holdout Set
 
@@ -246,7 +275,7 @@ Why hold out before labeling:
 - The holdout is a "final exam": it measures how well the model generalizes to truly unseen recipes
 - 50 files = ~2% of the usable pool -- negligible impact on training data volume
 
-Output: `data/samples/holdout.jsonl`
+Output: `data/bootstrap/holdout.jsonl`
 
 ## Architecture: Abstract LabelingClient Interface
 
@@ -427,9 +456,6 @@ src/labeling/
 │   ├── schema_spec.md          #   JSON output schema reference
 │   └── few_shots.jsonl         #   4 hand-crafted few-shot examples
 │
-├── orchestrator.py             # Main labeling loop — imports ONLY interfaces
-├── checkpoint.py               # Resume-safe progress tracking
-├── validator.py                # JSON parse -> schema validate -> cross-ref check
 ├── scorer.py                   # Confidence scoring (0-1) per extraction
 ├── dataset_builder.py          # Labeled JSON -> QLoRA Alpaca-format train/val JSONL
 ├── review_cli.py               # Minimal CLI for human review of low-confidence labels
@@ -438,7 +464,12 @@ src/labeling/
 │   ├── __init__.py
 │   └── logger.py               #   Structured logging (file + console, per-module levels)
 │
-├── run.py                      # Composition root & CLI (--backend claude|local)
+├── bootstrap/                  # One-off bootstrap workflow
+│   ├── sample_corpus.py        # Sample + persist dedup reservations
+│   ├── run.py                  # Full command: sample then label/resume
+│   ├── orchestrator.py         # Main bootstrap labeling loop
+│   ├── checkpoint.py           # Resume-safe progress tracking
+│   └── validator.py            # JSON parse + schema validation
 └── README.md
 ```
 
@@ -472,7 +503,7 @@ deduped raw corpus; a model rejection is retained as training data.
 ### Orchestrator (model-agnostic)
 
 ```python
-# src/labeling/orchestrator.py
+# src/labeling/bootstrap/orchestrator.py
 
 class LabelingPipeline:
     def __init__(
@@ -533,12 +564,12 @@ results = asyncio.run(pipeline.run(auto_label_manifest))
 
 ```
 data/
-├── dedup_store.db             # Persistent recipe-card hash DB (SQLite)
-├── checkpoint.json            # Resume-safe labeling progress state
-│
-├── samples/
+├── bootstrap/
 │   ├── manifest.jsonl         # 500 deduplicated documents for labeling
-│   └── holdout.jsonl          # 50 deduplicated documents set aside before labeling
+│   ├── holdout.jsonl          # 50 deduplicated documents set aside before labeling
+│   ├── sampling_report.json   # One-off sampling statistics
+│   ├── checkpoint.json        # Resume-safe bootstrap labeling progress state
+│   └── training.jsonl         # Durable structured bootstrap outputs
 ├── labels/
 │   ├── batch_001/             # Round 1 outputs (200 JSON files + batch manifest)
 │   ├── batch_002/             # Round 2 (200 files)
@@ -547,7 +578,6 @@ data/
 │   ├── low_confidence.jsonl   # Flagged for human review (confidence < 0.6)
 │   └── reviewed.jsonl         # Corrected labels after human review
 └── training/
-    ├── bootstrap.jsonl         # Durable structured outputs; includes valid not_a_recipe labels
     ├── train.jsonl             # ~425 examples (85% of labeled pool)
     ├── val.jsonl               # ~75 examples (15% of labeled pool, for hyperparameter tuning)
     └── dataset_stats.json      # Per-field coverage report
@@ -559,10 +589,10 @@ data/
 corpus (5564 files)
     |
     v
-[DedupStore]  --> data/dedup_store.db (deduplicate the raw corpus)
+[DedupStore]  --> src/labeling/dedup/dedup_store.db (deduplicate the raw corpus)
     v
-[sampler.py]  --> data/samples/manifest.jsonl (500 deduplicated documents)
-    |               data/samples/holdout.jsonl  (50 deduplicated documents)
+[sampler.py]  --> data/bootstrap/manifest.jsonl (500 deduplicated documents)
+    |               data/bootstrap/holdout.jsonl  (50 deduplicated documents)
     v
 [orchestrator.py]
     |  for each file in manifest:
@@ -572,12 +602,12 @@ corpus (5564 files)
     |    4. client.label()             # Claude API or local model (abstract interface)
     |    5. validator.check()          # JSON/schema/cross-ref/sanity; accepts explicit not_a_recipe rejection
     |    6. scorer.score()             # 0-1 confidence
-    |    7. append structured result to data/training/bootstrap.jsonl
+    |    7. append structured result to data/bootstrap/training.jsonl
     |    8. dedup_store.update_status(ACCEPTED)  # only after JSONL write; shared with production
     |    9. checkpoint.mark_completed() # atomically advance checkpoint
     |
     v
-[dataset_builder.py]  --> split bootstrap.jsonl into data/training/train.jsonl + val.jsonl
+[dataset_builder.py]  --> split data/bootstrap/training.jsonl into data/training/train.jsonl + val.jsonl
 ```
 
 **Train/val/holdout distinction**:

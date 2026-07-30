@@ -13,6 +13,9 @@ venv/
 
 # Data (large corpus, not version-controlled)
 data/markdown/
+src/labeling/dedup/dedup_store.db
+src/labeling/dedup/dedup_store.db-shm
+src/labeling/dedup/dedup_store.db-wal
 
 # Environment
 .env

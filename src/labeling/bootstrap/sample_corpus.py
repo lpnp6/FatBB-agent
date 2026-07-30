@@ -13,7 +13,6 @@ labels and remain in the labeling manifest for the model to return as
 
 from __future__ import annotations
 
-import argparse
 import json
 import random
 from collections import Counter, defaultdict
@@ -27,7 +26,6 @@ from labeling.interfaces.dedup_store import HashStatus
 
 
 MARKDOWN_SUFFIXES = {".md", ".markdown"}
-DEFAULT_RATIOS = {"recipetineats": 0.4, "wellplated": 0.6}
 
 
 @dataclass(frozen=True)
@@ -48,16 +46,6 @@ class Cluster:
         """Use a stable representative when a cluster has multiple variants."""
         matches = [document for document in self.documents if document.source == source]
         return min(matches, key=lambda document: str(document.relative_path)) if matches else None
-
-
-def parse_assignment(value: str) -> tuple[str, str]:
-    try:
-        name, assigned_value = value.split("=", 1)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("expected NAME=VALUE") from error
-    if not name or not assigned_value:
-        raise argparse.ArgumentTypeError("both NAME and VALUE are required")
-    return name.lower(), assigned_value
 
 
 def discover_documents(source_roots: dict[str, Path]) -> list[tuple[str, Path, Path]]:
@@ -279,67 +267,3 @@ def build_manifests(
         "note": "No filename or structure filtering was applied; not_a_recipe is a retained label.",
     }
     return labeling_records, holdout_records, report
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", action="append", required=True, type=parse_assignment, metavar="NAME=PATH")
-    parser.add_argument("--ratio", action="append", type=parse_assignment, metavar="NAME=WEIGHT")
-    parser.add_argument("--target", type=int, default=500, help="number of labeling documents (default: 500)")
-    parser.add_argument("--holdout", type=int, default=50, help="number of holdout documents (default: 50)")
-    parser.add_argument("--seed", type=int, default=20260730, help="random seed (default: 20260730)")
-    parser.add_argument("--threshold", type=int, default=3, help="SimHash Hamming threshold (default: 3)")
-    parser.add_argument("--output-dir", type=Path, default=Path("data") / "bootstrap")
-    parser.add_argument(
-        "--dedup-db",
-        type=Path,
-        default=Path("data") / "dedup_store.db",
-        help="persistent SimHash dedup database (default: data/dedup_store.db)",
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    if args.target < 1 or args.holdout < 0:
-        raise SystemExit("--target must be positive and --holdout must be non-negative")
-    source_roots = dict(args.source)
-    if len(source_roots) != len(args.source):
-        raise SystemExit("source names must be unique")
-
-    if args.ratio:
-        ratios = {name: float(weight) for name, weight in args.ratio}
-    elif set(source_roots) == set(DEFAULT_RATIOS):
-        ratios = DEFAULT_RATIOS.copy()
-    else:
-        ratios = {source: 1 / len(source_roots) for source in source_roots}
-    if set(ratios) != set(source_roots) or any(weight <= 0 for weight in ratios.values()):
-        raise SystemExit("ratios must be positive and specify every source exactly once")
-    total_weight = sum(ratios.values())
-    ratios = {source: weight / total_weight for source, weight in ratios.items()}
-
-    # This is the only write performed by the one-off script: reproducible
-    # manifests, a report, and IN_FLIGHT reservations for bootstrap labeling.
-    labeling_records, holdout_records, report = build_manifests(
-        {source: Path(path).expanduser().resolve() for source, path in source_roots.items()},
-        ratios, args.target, args.holdout, args.seed, args.threshold,
-    )
-    output_dir = args.output_dir.resolve()
-    dedup_db = args.dedup_db.resolve()
-    # Validate before replacing manifest files, then reserve the exact files
-    # that will be sent to the model. This makes the persistent store the
-    # hand-off point between sampling and extraction.
-    assert_not_registered(labeling_records, dedup_db, args.threshold)
-    write_jsonl(output_dir / "manifest.jsonl", labeling_records)
-    write_jsonl(output_dir / "holdout.jsonl", holdout_records)
-    persist_labeling_manifest(labeling_records, dedup_db, args.threshold)
-    report["dedup_store"] = str(dedup_db)
-    report["registered_in_flight"] = len(labeling_records)
-    (output_dir / "sampling_report.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
-
-
-if __name__ == "__main__":
-    main()

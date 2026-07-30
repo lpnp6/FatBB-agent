@@ -1,46 +1,41 @@
 # Bootstrap sampling (one-off)
 
-`sample_corpus.py` samples all Markdown files without filename-keyword or
-recipe-structure filtering. A model response of `not_a_recipe` is retained as
-labeling data, so the labeling manifest always contains exactly the requested
-number of documents.
+`run.py` is the only bootstrap entry point. It scans one source directory,
+deduplicates and samples it, then labels the resulting manifest. It does not
+use filename-keyword or recipe-structure filtering; `not_a_recipe` is retained
+as a valid training label.
 
 This is a **one-off bootstrap tool** for generating the initial manifests. It
 is not part of the production auto-labeling runtime. Re-run it only when
 intentionally creating a new sample, and keep the generated manifest and seed
 with that labeling batch for reproducibility.
 
-With the two corpus roots, the default source ratios are 40% RecipeTin Eats
-and 60% Well Plated:
+## Run the complete bootstrap workflow
+
+Set the API key and run one command. On its first run it samples, persists
+deduplication reservations, and labels; later runs reuse the manifest and
+checkpoint to resume safely.
 
 ```bash
-PYTHONPATH=src python -m labeling.bootstrap.sample_corpus \
-  --source recipetineats=/path/to/recipetineats \
-  --source wellplated=/path/to/wellplated
+export OPENAI_API_KEY="..."
+export OPENAI_BASE_URL="https://your-compatible-endpoint/v1"  # optional
+export OPENAI_MODEL="gpt-4o"                                  # optional
+PYTHONPATH=src python -m labeling.bootstrap.run \
+  --source-dir /path/to/markdown-corpus
 ```
 
-Windows PowerShell:
+### Windows (PowerShell)
 
 ```powershell
+$env:OPENAI_API_KEY = "..."
+$env:OPENAI_BASE_URL = "https://your-compatible-endpoint/v1" # optional
+$env:OPENAI_MODEL = "gpt-4o"                                 # optional
 $env:PYTHONPATH = "src"
-python -m labeling.bootstrap.sample_corpus `
-  --source "recipetineats=C:\path\to\recipetineats" `
-  --source "wellplated=C:\path\to\wellplated"
+python -m labeling.bootstrap.run --source-dir C:\path\to\markdown-corpus
 ```
 
-Windows Command Prompt:
-
-```bat
-set PYTHONPATH=src
-python -m labeling.bootstrap.sample_corpus ^
-  --source "recipetineats=C:\path\to\recipetineats" ^
-  --source "wellplated=C:\path\to\wellplated"
-```
-
-It writes `data/samples/manifest.jsonl` (500 documents), `holdout.jsonl` (50
-documents), and `sampling_report.json`. It also registers every labeling
-manifest fingerprint as `in_flight` in `data/dedup_store.db` before any model
-call. After a structured extraction is durably appended to the training JSONL,
-the labeling orchestrator must change that record to `accepted`; production
-uses the same database to skip duplicates. Sampling is deterministic for a
-given seed. Use `--ratio NAME=WEIGHT` to set different source proportions.
+It writes validated recipe outputs and valid `not_a_recipe` classification
+records to `data/bootstrap/training.jsonl`. Recipe records can be mapped to
+the graph; non-recipe records remain training-only. Progress is atomically
+recorded in `data/bootstrap/checkpoint.json`, allowing the same command to
+resume without repeating completed API calls.

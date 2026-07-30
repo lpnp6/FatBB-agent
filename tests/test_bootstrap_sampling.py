@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 
 from labeling.bootstrap.sample_corpus import (
@@ -12,6 +13,7 @@ from labeling.bootstrap.sample_corpus import (
     cluster_documents,
     persist_labeling_manifest,
 )
+from labeling.bootstrap.run import prepare_manifest
 from labeling.dedup.simhash_store import SimHashDedupStore
 from labeling.interfaces.dedup_store import HashStatus
 
@@ -21,23 +23,39 @@ def recipe(name: str) -> str:
 
 
 class BootstrapSamplingTests(unittest.TestCase):
-    def test_sampler_keeps_non_recipe_filenames_and_preserves_source_quota(self) -> None:
+    def test_complete_runner_prepares_once_then_reuses_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            recipetineats = root / "recipetineats"
-            wellplated = root / "wellplated"
-            recipetineats.mkdir()
-            wellplated.mkdir()
+            corpus = root / "corpus"
+            corpus.mkdir()
             for index in range(3):
-                (recipetineats / f"recipe-{index}.md").write_text(recipe(f"r{index}"), encoding="utf-8")
+                (corpus / f"recipe-{index}.md").write_text(recipe(f"r{index}"), encoding="utf-8")
+            args = Namespace(
+                source_dir=corpus, source_name="corpus", target=2, holdout=1,
+                seed=7, threshold=3, output_dir=root / "bootstrap", dedup_db=root / "dedup.db",
+            )
+
+            manifest_path, first = prepare_manifest(args)
+            same_manifest_path, second = prepare_manifest(args)
+
+            self.assertEqual(first["sampling"], "created")
+            self.assertEqual(second, {"sampling": "reused"})
+            self.assertEqual(manifest_path, same_manifest_path)
+            self.assertEqual(len(manifest_path.read_text(encoding="utf-8").splitlines()), 2)
+
+    def test_sampler_keeps_non_recipe_filenames_from_one_source_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            corpus = root / "corpus"
+            corpus.mkdir()
+            for index in range(9):
+                (corpus / f"recipe-{index}.md").write_text(recipe(f"r{index}"), encoding="utf-8")
             # This would have been removed by the retired filename filter.
-            (recipetineats / "gift-guide.md").write_text("Gift ideas, not a recipe.", encoding="utf-8")
-            for index in range(6):
-                (wellplated / f"recipe-{index}.md").write_text(recipe(f"w{index}"), encoding="utf-8")
+            (corpus / "gift-guide.md").write_text("Gift ideas, not a recipe.", encoding="utf-8")
 
             labeling, holdout, report = build_manifests(
-                {"recipetineats": recipetineats, "wellplated": wellplated},
-                {"recipetineats": 0.4, "wellplated": 0.6},
+                {"corpus": corpus},
+                {"corpus": 1.0},
                 target=8,
                 holdout=2,
                 seed=7,
@@ -46,8 +64,8 @@ class BootstrapSamplingTests(unittest.TestCase):
 
             self.assertEqual(len(labeling), 8)
             self.assertEqual(len(holdout), 2)
-            self.assertEqual(report["labeling_by_source"], {"recipetineats": 3, "wellplated": 5})
-            self.assertEqual(report["holdout_by_source"], {"recipetineats": 1, "wellplated": 1})
+            self.assertEqual(report["labeling_by_source"], {"corpus": 8})
+            self.assertEqual(report["holdout_by_source"], {"corpus": 2})
             paths = {record["relative_path"] for record in labeling + holdout}
             self.assertIn("gift-guide.md", paths)
 
