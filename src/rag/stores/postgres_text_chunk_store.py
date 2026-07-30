@@ -98,28 +98,39 @@ class PostgresTextChunkStore(BM25SearchStore):
             cursor.execute("DELETE FROM rag_text_chunks WHERE id = ANY(%s)", (list(chunk_ids),))
 
     def replace_document_chunks(
-        self, document_id: str, chunks: Sequence[TextChunk]
+        self, entries: Sequence[tuple[str, Sequence[TextChunk]]], *,
+        on_progress: Callable[[str, int, int], None] | None = None,
     ) -> None:
-        """Replace one document's chunks in one transaction.
+        """Replace chunks for multiple documents in a single connection.
 
         Existing IDs are preserved until replacement rows have been prepared;
         rows no longer emitted by the chunker are removed before commit.
         """
-        if any(chunk.document_id != document_id for chunk in chunks):
-            raise ValueError("every replacement chunk must belong to document_id")
+        if not entries:
+            return
 
+        # Validate before opening a connection.
+        for document_id, chunks in entries:
+            if any(chunk.document_id != document_id for chunk in chunks):
+                raise ValueError("every replacement chunk must belong to document_id")
+
+        total = len(entries)
         with self._connect() as connection, connection.cursor() as cursor:
-            if chunks:
-                cursor.execute(
-                    "DELETE FROM rag_text_chunks "
-                    "WHERE document_id = %s AND NOT (id = ANY(%s))",
-                    (document_id, [chunk.id for chunk in chunks]),
-                )
-                self._upsert_chunks(cursor, chunks)
-            else:
-                cursor.execute(
-                    "DELETE FROM rag_text_chunks WHERE document_id = %s", (document_id,)
-                )
+            for idx, (document_id, chunks) in enumerate(entries):
+                if on_progress is not None:
+                    on_progress("Writing to database", idx + 1, total)
+                if chunks:
+                    cursor.execute(
+                        "DELETE FROM rag_text_chunks "
+                        "WHERE document_id = %s AND NOT (id = ANY(%s))",
+                        (document_id, [chunk.id for chunk in chunks]),
+                    )
+                    self._upsert_chunks(cursor, chunks)
+                else:
+                    cursor.execute(
+                        "DELETE FROM rag_text_chunks WHERE document_id = %s",
+                        (document_id,),
+                    )
 
     def delete_by_document_ids(self, document_ids: Sequence[str]) -> None:
         """Remove all chunk rows associated with deleted source documents."""

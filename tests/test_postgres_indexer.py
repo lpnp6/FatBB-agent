@@ -33,10 +33,11 @@ class RecordingBM25Store(BM25SearchStore):
         """Accept chunk deletion required by the storage interface."""
 
     def replace_document_chunks(
-        self, document_id: str, chunks: Sequence[TextChunk]
+        self, entries: Sequence[tuple[str, Sequence[TextChunk]]], *,
+        on_progress: object = None,
     ) -> None:
-        """Capture the exact replacement payload for one source document."""
-        self.replacements.append((document_id, list(chunks)))
+        """Capture the exact replacement payloads for one or more documents."""
+        self.replacements.extend((document_id, list(chunks)) for document_id, chunks in entries)
 
     def delete_by_document_ids(self, document_ids: Sequence[str]) -> None:
         """Capture document IDs requested for deletion."""

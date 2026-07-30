@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from ..models.document import ScoredTextChunk, TextChunk
 
@@ -25,9 +25,10 @@ class TextChunkStore(ABC):
 
     @abstractmethod
     def replace_document_chunks(
-        self, document_id: str, chunks: Sequence[TextChunk]
+        self, entries: Sequence[tuple[str, Sequence[TextChunk]]], *,
+        on_progress: Callable[[str, int, int], None] | None = None,
     ) -> None:
-        """Atomically replace all chunks belonging to one document."""
+        """Atomically replace chunks for one or more documents in one connection."""
 
     @abstractmethod
     def delete_by_document_ids(self, document_ids: Sequence[str]) -> None:

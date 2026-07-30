@@ -38,10 +38,12 @@ class FakeBM25Store(BM25SearchStore):
         self.chunks = [chunk for chunk in self.chunks if chunk.id not in ids]
 
     def replace_document_chunks(
-        self, document_id: str, chunks: Sequence[TextChunk]
+        self, entries: Sequence[tuple[str, Sequence[TextChunk]]], *,
+        on_progress: object = None,
     ) -> None:
-        self.delete_by_document_ids([document_id])
-        self.upsert_chunks(chunks)
+        for document_id, chunks in entries:
+            self.delete_by_document_ids([document_id])
+            self.upsert_chunks(chunks)
 
     def delete_by_document_ids(self, document_ids: Sequence[str]) -> None:
         ids = set(document_ids)

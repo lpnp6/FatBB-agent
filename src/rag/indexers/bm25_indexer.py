@@ -30,14 +30,18 @@ class BM25Indexer(Indexer):
         """Rebuild each document's chunks for the backend BM25 index."""
         total = len(documents)
         logger.info("Upserting documents into BM25 index", extra={"document_count": total})
+        # Chunk every document eagerly so that the store receives a single
+        # batch write in one connection, avoiding per-document TCP overhead.
+        entries: list[tuple[str, Sequence[TextChunk]]] = []
         for idx, document in enumerate(
-            tqdm(documents, desc="Upserting documents", unit="document", disable=on_progress is not None)
+            tqdm(documents, desc="Chunking documents", unit="document", disable=on_progress is not None)
         ):
             if on_progress is not None:
-                on_progress("Upserting documents", idx + 1, total)
+                on_progress("Chunking documents", idx + 1, total)
             chunks = self._chunker.chunk(document)
             self._validate_chunks(document, chunks)
-            self._store.replace_document_chunks(document.id, chunks)
+            entries.append((document.id, chunks))
+        self._store.replace_document_chunks(entries, on_progress=on_progress)
         logger.info("Completed BM25 document upsert", extra={"document_count": total})
 
     def delete_documents(self, document_ids: Sequence[str]) -> None:
