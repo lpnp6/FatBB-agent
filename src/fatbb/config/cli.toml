@@ -1,7 +1,10 @@
 # Navigation labels and order for the interactive terminal UI.
 
 [menus.palette]
-items = [{ value = "knowledge_base", label = "Knowledge Base" }]
+items = [
+  { value = "knowledge_base", label = "Knowledge Base" },
+  { value = "back", label = "Back" },
+]
 
 [menus.knowledge_base]
 items = [
@@ -11,13 +14,22 @@ items = [
 ]
 
 [menus.retrieval_type]
-items = [{ value = "bm25", label = "BM25" }]
+items = [
+  { value = "bm25", label = "BM25" },
+  { value = "back", label = "Back" },
+]
 
 [menus.database_type]
-items = [{ value = "pg", label = "PostgreSQL" }]
+items = [
+  { value = "pg", label = "PostgreSQL" },
+  { value = "back", label = "Back" },
+]
 
 [menus.source_type]
-items = [{ value = "file_path", label = "File path" }]
+items = [
+  { value = "file_path", label = "File path" },
+  { value = "back", label = "Back" },
+]
 
 # Pages select an item source. They do not name Python methods, so the config
 # remains presentation data while the controller keeps trusted providers.

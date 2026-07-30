@@ -13,4 +13,4 @@ if TYPE_CHECKING:
 
 
 def existing_knowledge_bases(controller: CliController) -> tuple[str, ...]:
-    return controller._existing_knowledge_base_items()
+    return (*controller._existing_knowledge_base_items(), "Back")

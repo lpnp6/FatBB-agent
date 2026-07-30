@@ -25,6 +25,16 @@ class CliUpdateTests(unittest.TestCase):
         self.assertIs(transition.state.screen, Screen.KNOWLEDGE_BASE_MENU)
         self.assertEqual(transition.state.input_text, "")
 
+    def test_palette_back_returns_to_chat(self) -> None:
+        transition = update(
+            UiState(screen=Screen.PALETTE, input_text="/", selected_index=1),
+            KeyPressed("enter"),
+            item_count=2,
+        )
+
+        self.assertIs(transition.state.screen, Screen.CHAT)
+        self.assertEqual(transition.state.input_text, "")
+
     def test_arrow_navigation_wraps(self) -> None:
         transition = update(UiState(screen=Screen.KNOWLEDGE_BASE_MENU), KeyPressed("up"), item_count=3)
 

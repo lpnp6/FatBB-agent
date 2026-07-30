@@ -38,10 +38,12 @@ class KnowledgeBaseService:
         source_type: str, source_path: str, *,
         on_progress: Callable[[str, int, int], None] | None = None,
     ) -> KnowledgeBase:
-        """Import a source path, index its documents, and persist its metadata.
+        """Validate and persist configuration, then import and index a source.
 
-        Documents are indexed before the knowledge-base record is saved, so an
-        empty or unsupported source never produces a selectable empty entry.
+        The knowledge-base record is saved immediately after its database
+        connection is verified. This preserves its configuration if a later
+        import or indexing run is interrupted, so a future incremental import
+        can resume using the same knowledge base.
         """
         normalized_name = name.strip()
         if not normalized_name:
@@ -78,6 +80,9 @@ class KnowledgeBaseService:
                 f"Could not connect to the configured {config.database_type} database."
             ) from error
 
+        self._repository.create_knowledge_base(knowledge_base)
+        logger.info("Knowledge-base configuration saved", extra={"knowledge_base": knowledge_base.name})
+
         # Importers attach the generated ID to each document for retrieval scoping.
         logger.info(
             "Resolving importer adapter for source_type=%r",
@@ -89,13 +94,11 @@ class KnowledgeBaseService:
         if not documents:
             raise ValueError("No supported files were found at the specified path.")
 
-        # Index first; persist the entry only after its documents are searchable.
         logger.info(
             "Indexing source documents",
             extra={"knowledge_base": knowledge_base.name, "document_count": len(documents)},
         )
         adapter.indexer(config.database_url).upsert_documents(documents, on_progress=on_progress)
-        self._repository.create_knowledge_base(knowledge_base)
         logger.info(
             "Knowledge base created",
             extra={"knowledge_base": knowledge_base.name, "document_count": len(documents)},

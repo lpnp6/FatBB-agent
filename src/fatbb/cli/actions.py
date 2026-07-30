@@ -37,6 +37,13 @@ def return_to_chat(controller: CliController) -> None:
 
 def select_knowledge_base(controller: CliController, value: str | None) -> None:
     """Make the selected existing knowledge base active for chat retrieval."""
+    selected_index = int(value or "0")
+    back_index = len(controller._existing) if controller._existing else 1
+    if selected_index == back_index:
+        controller.state = replace(
+            controller.state, screen=Screen.KNOWLEDGE_BASE_MENU, input_text="", selected_index=0,
+        )
+        return
     if not controller._existing:
         controller.state = replace(controller.state, status="No knowledge bases are available.")
         return
@@ -100,6 +107,11 @@ def set_database_url(controller: CliController, value: str | None) -> None:
 
 def set_retrieval_type(controller: CliController, value: str | None) -> None:
     choices = controller._config.menu_items(Screen.RETRIEVAL_TYPE.value) or ()
+    if choices[int(value or "0")].value == "back":
+        controller.state = replace(
+            controller.state, screen=Screen.KNOWLEDGE_BASE_MENU, input_text="", selected_index=0,
+        )
+        return
     controller.state = replace(
         controller.state, pending_retrieval_type=choices[int(value or "0")].value,
         screen=Screen.DATABASE_TYPE, selected_index=0,
@@ -108,6 +120,11 @@ def set_retrieval_type(controller: CliController, value: str | None) -> None:
 
 def set_database_type(controller: CliController, value: str | None) -> None:
     choices = controller._config.menu_items(Screen.DATABASE_TYPE.value) or ()
+    if choices[int(value or "0")].value == "back":
+        controller.state = replace(
+            controller.state, screen=Screen.RETRIEVAL_TYPE, input_text="", selected_index=0,
+        )
+        return
     controller.state = replace(
         controller.state, pending_database_type=choices[int(value or "0")].value,
         screen=Screen.DATABASE_URL, input_text="", selected_index=0,
@@ -116,6 +133,11 @@ def set_database_type(controller: CliController, value: str | None) -> None:
 
 def set_source_type(controller: CliController, value: str | None) -> None:
     choices = controller._config.menu_items(Screen.SOURCE_TYPE.value) or ()
+    if choices[int(value or "0")].value == "back":
+        controller.state = replace(
+            controller.state, screen=Screen.DATABASE_URL, input_text="", selected_index=0,
+        )
+        return
     controller.state = replace(
         controller.state, pending_source_type=choices[int(value or "0")].value,
         screen=Screen.KNOWLEDGE_BASE_NAME, input_text="", selected_index=0,

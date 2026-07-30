@@ -38,6 +38,8 @@ def update(state: UiState, event: InputChanged | KeyPressed, *, item_count: int 
         return Transition(state)
 
     if state.screen is Screen.PALETTE:
+        if item_count > 1 and state.selected_index == item_count - 1:
+            return Transition(replace(state, screen=Screen.CHAT, input_text="", selected_index=0))
         return Transition(replace(state, screen=Screen.KNOWLEDGE_BASE_MENU, input_text=""))
     if state.screen is Screen.KNOWLEDGE_BASE_MENU:
         return Transition(

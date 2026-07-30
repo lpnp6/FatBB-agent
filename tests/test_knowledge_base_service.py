@@ -9,22 +9,28 @@ from rag.models import Document, SourceRef
 
 
 class RecordingRepository:
-    def __init__(self) -> None:
+    def __init__(self, events: list[str] | None = None) -> None:
         self.created = []
+        self.events = events
 
     def list_knowledge_bases(self):
         return self.created
 
     def create_knowledge_base(self, knowledge_base) -> None:
+        if self.events is not None:
+            self.events.append("save_configuration")
         self.created.append(knowledge_base)
 
 
 class RecordingImporter:
-    def __init__(self, events: list[str]) -> None:
+    def __init__(self, events: list[str], fail_load: bool = False) -> None:
         self.events = events
+        self.fail_load = fail_load
 
-    def load(self, path: str, *, knowledge_base_id: str):
+    def load(self, path: str, *, knowledge_base_id: str, on_progress=None):
         self.events.append("load")
+        if self.fail_load:
+            raise RuntimeError("loading was interrupted")
         return [
             Document(
                 id="document-1",
@@ -48,7 +54,7 @@ class RecordingAdapter:
     def indexer(self, database_url: str):
         return self
 
-    def upsert_documents(self, documents) -> None:
+    def upsert_documents(self, documents, *, on_progress=None) -> None:
         self.events.append("upsert_documents")
 
     def retriever(self, database_url: str):
@@ -70,7 +76,7 @@ class RecordingRegistry:
 class KnowledgeBaseServiceTests(unittest.TestCase):
     def test_checks_database_before_loading_and_indexing_documents(self) -> None:
         events: list[str] = []
-        repository = RecordingRepository()
+        repository = RecordingRepository(events)
         service = KnowledgeBaseService(
             repository,
             RecordingRegistry(RecordingAdapter(events), RecordingImporter(events)),
@@ -78,7 +84,24 @@ class KnowledgeBaseServiceTests(unittest.TestCase):
 
         service.create("Docs", "bm25", "pg", "postgresql://db", "file_path", "/source")
 
-        self.assertEqual(events, ["check_connection", "load", "upsert_documents"])
+        self.assertEqual(
+            events,
+            ["check_connection", "save_configuration", "load", "upsert_documents"],
+        )
+        self.assertEqual(len(repository.created), 1)
+
+    def test_preserves_configuration_when_loading_is_interrupted(self) -> None:
+        events: list[str] = []
+        repository = RecordingRepository(events)
+        service = KnowledgeBaseService(
+            repository,
+            RecordingRegistry(RecordingAdapter(events), RecordingImporter(events, fail_load=True)),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "loading was interrupted"):
+            service.create("Docs", "bm25", "pg", "postgresql://db", "file_path", "/source")
+
+        self.assertEqual(events, ["check_connection", "save_configuration", "load"])
         self.assertEqual(len(repository.created), 1)
 
     def test_does_not_load_documents_when_connection_check_fails(self) -> None:
