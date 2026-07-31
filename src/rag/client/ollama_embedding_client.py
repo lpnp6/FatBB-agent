@@ -13,7 +13,7 @@ from ..interfaces.client import EmbeddingClient
 
 # Texts per HTTP request to Ollama.  Keeps payload under ~3 MB for the
 # nomic-embed-text model (max 2048 tokens ≈ ~8 KB per text).
-_BATCH_SIZE = 50
+_BATCH_SIZE = 64
 
 
 class OllamaEmbeddingClient(EmbeddingClient):
