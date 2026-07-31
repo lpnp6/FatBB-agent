@@ -48,7 +48,7 @@ class PostgresVectorSearchStore(PostgresBM25SearchStore, VectorSearchStore):
             )
             all_chunks = [chunk for _, chunks in entries for chunk in chunks]
             if all_chunks:
-                await self._aupsert_chunks(cursor, all_chunks)
+                await self._aupsert_chunks(cursor, all_chunks, on_progress=on_progress)
 
     def _upsert_chunks(self, cursor: object, chunks: Sequence[TextChunk]) -> None:
         """Sync bridge so inherited ``upsert_chunks`` delegates correctly."""
@@ -58,17 +58,27 @@ class PostgresVectorSearchStore(PostgresBM25SearchStore, VectorSearchStore):
         """Generate and validate the asynchronous query embedding."""
         return self._validate_embedding(await self._embedding_client.a_embedding(query_text))
 
-    async def _aupsert_chunks(self, cursor: object, chunks: Sequence[TextChunk]) -> None:
+    async def _aupsert_chunks(
+        self, cursor: object, chunks: Sequence[TextChunk], *,
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ) -> None:
         """Upsert chunks together with async batch-generated embeddings."""
         if not chunks:
             return
+        total = len(chunks)
+        if on_progress is not None:
+            on_progress("Generating embeddings", 0, total)
         texts = [chunk.content for chunk in chunks]
-        embeddings = await self._embedding_client.a_batch_embedding(texts)
+        embeddings = await self._embedding_client.a_batch_embedding(
+            texts, on_progress=on_progress,
+        )
         if len(embeddings) != len(chunks):
             raise RuntimeError(
                 f"Batch embedding returned {len(embeddings)} vectors "
                 f"for {len(chunks)} chunks"
             )
+        if on_progress is not None:
+            on_progress("Writing to database", 0, total)
 
         query = self._query(
             """
@@ -102,6 +112,8 @@ class PostgresVectorSearchStore(PostgresBM25SearchStore, VectorSearchStore):
             for i, chunk in enumerate(chunks)
         ]
         cursor.executemany(query, values)  # type: ignore[attr-defined]
+        if on_progress is not None:
+            on_progress("Writing to database", total, total)
 
     def search(
         self,

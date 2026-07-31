@@ -7,7 +7,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -70,30 +70,51 @@ class OllamaEmbeddingClient(EmbeddingClient):
 
     # ── batch embedding ──────────────────────────────────────────────
 
-    def batch_embedding(self, texts: Sequence[str]) -> list[list[float]]:
+    def batch_embedding(
+        self, texts: Sequence[str], *,
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ) -> list[list[float]]:
         """Generate embeddings for *texts*, splitting into sub-batches."""
         if not texts:
             return []
+        total = len(texts)
         sub_batches = [
             texts[i : i + _BATCH_SIZE]
-            for i in range(0, len(texts), _BATCH_SIZE)
+            for i in range(0, total, _BATCH_SIZE)
         ]
         t0 = time.monotonic()
         logger.info(
             "Starting sync batch embedding: %d texts in %d sub-batches",
-            len(texts), len(sub_batches),
+            total, len(sub_batches),
         )
         ordered: list[object] = [None] * len(sub_batches)
+        completed = 0
+        failed: list[int] = []
         for idx, batch in enumerate(sub_batches):
-            ordered[idx] = self._batch_with_retry(batch)
+            try:
+                ordered[idx] = self._batch_with_retry(batch)
+                completed += len(batch)
+            except RuntimeError:
+                logger.exception("Sub-batch %d failed after all retries", idx)
+                failed.append(idx)
+            if on_progress is not None:
+                on_progress("Generating embeddings", completed, total)
         elapsed = time.monotonic() - t0
+        if failed:
+            raise RuntimeError(
+                f"{len(failed)}/{len(sub_batches)} sub-batches failed "
+                f"(indices: {', '.join(str(i) for i in failed)})"
+            )
         logger.info(
             "Sync batch embedding complete: %d vectors in %.1fs (%.0f ms/text)",
-            len(texts), elapsed, elapsed / len(texts) * 1000,
+            total, elapsed, elapsed / total * 1000,
         )
         return [vec for batch in ordered for vec in batch]  # type: ignore[misc]
 
-    async def a_batch_embedding(self, texts: Sequence[str]) -> list[list[float]]:
+    async def a_batch_embedding(
+        self, texts: Sequence[str], *,
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ) -> list[list[float]]:
         """Generate embeddings for *texts* with sub-batches sent concurrently.
 
         Failed sub-batches are retried automatically; other batches
@@ -101,17 +122,19 @@ class OllamaEmbeddingClient(EmbeddingClient):
         """
         if not texts:
             return []
+        total = len(texts)
         sub_batches = [
             texts[i : i + _BATCH_SIZE]
-            for i in range(0, len(texts), _BATCH_SIZE)
+            for i in range(0, total, _BATCH_SIZE)
         ]
         t0 = time.monotonic()
         logger.info(
             "Starting async batch embedding: %d texts in %d sub-batches",
-            len(texts), len(sub_batches),
+            total, len(sub_batches),
         )
         ordered: list[object] = [None] * len(sub_batches)
         pending: list[tuple[int, Sequence[str]]] = list(enumerate(sub_batches))
+        completed = 0
 
         for attempt in range(_MAX_RETRIES):
             if not pending:
@@ -136,7 +159,10 @@ class OllamaEmbeddingClient(EmbeddingClient):
                     still_pending.append((idx, sub_batches[idx]))
                 else:
                     ordered[idx] = outcome
+                    completed += len(outcome)
             pending = still_pending
+            if on_progress is not None:
+                on_progress("Generating embeddings", completed, total)
 
         if pending:
             failed = [str(idx) for idx, _ in pending]

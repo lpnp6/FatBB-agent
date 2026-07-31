@@ -19,10 +19,10 @@ class FakeEmbeddingClient(EmbeddingClient):
     async def a_embedding(self, text: str) -> list[float]:
         return [0.25, 0.75]
 
-    def batch_embedding(self, texts):
+    def batch_embedding(self, texts, *, on_progress=None):
         return [[0.25, 0.75] for _ in texts]
 
-    async def a_batch_embedding(self, texts):
+    async def a_batch_embedding(self, texts, *, on_progress=None):
         return [[0.25, 0.75] for _ in texts]
 
 
