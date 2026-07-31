@@ -1,4 +1,4 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
-ALTER TABLE rag_text_chunks
+ALTER TABLE "{{table_name}}"
     ADD COLUMN IF NOT EXISTS embedding vector;

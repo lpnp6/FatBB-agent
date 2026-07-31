@@ -54,6 +54,9 @@ class KnowledgeBaseAdapter(Protocol):
     def check_connection(self, config: KnowledgeBaseConfig) -> None:
         """Raise when this adapter cannot connect to its configured database."""
 
+    def migrate(self, config: KnowledgeBaseConfig) -> None:
+        """Create or update the database objects required by this adapter."""
+
     def indexer(self, config: KnowledgeBaseConfig) -> Indexer: ...
 
     def retriever(self, config: KnowledgeBaseConfig) -> Retriever: ...

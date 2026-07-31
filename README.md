@@ -40,14 +40,16 @@ pip install -r requirements.txt
 pip install -e .
 
 export DATABASE_URL='postgresql://user:password@localhost:5432/fatbb'
-psql "$DATABASE_URL" -f migrations/postgres/0001_create_rag_text_chunks.sql
 ```
 
-The migration creates the `rag_text_chunks` table, metadata indexes, and the BM25 index. The application does not execute DDL at runtime.
+When a knowledge base is created, FatBB applies the PostgreSQL migrations to its
+configured database. The migration templates receive the validated table name
+used by the store (currently `rag_text_chunks`) and create the table, metadata
+indexes, BM25 index, vector column, and HNSW index.
 
 ## Interactive CLI
 
-After installing the project and applying the RAG migration, start a persistent terminal session:
+After installing the project, start a persistent terminal session:
 
 ```bash
 fatbb

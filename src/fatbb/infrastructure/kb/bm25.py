@@ -15,6 +15,9 @@ class PostgresBm25KnowledgeBase:
         """Verify PostgreSQL is reachable before source files are read."""
         PostgresBM25SearchStore(config.database_url).check_connection()
 
+    def migrate(self, config: KnowledgeBaseConfig) -> None:
+        PostgresBM25SearchStore(config.database_url).migrate()
+
     def indexer(self, config: KnowledgeBaseConfig) -> BM25Indexer:
         return BM25Indexer(MarkdownChunker(), PostgresBM25SearchStore(config.database_url))
 

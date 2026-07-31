@@ -80,7 +80,10 @@ class KnowledgeBaseService:
         try:
             adapter.check_connection(config)
             if on_progress is not None:
-                on_progress("Database connection successful", 1, 1)
+                on_progress("Applying database migrations", 0, 1)
+            adapter.migrate(config)
+            if on_progress is not None:
+                on_progress("Database ready", 1, 1)
         except Exception as error:
             logger.exception(
                 "Database connection check failed",

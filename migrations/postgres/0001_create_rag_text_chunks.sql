@@ -1,6 +1,6 @@
 CREATE EXTENSION IF NOT EXISTS pg_search;
 
-CREATE TABLE IF NOT EXISTS rag_text_chunks (
+CREATE TABLE IF NOT EXISTS "{{table_name}}" (
     id TEXT PRIMARY KEY,
     document_id TEXT NOT NULL,
     content TEXT NOT NULL,
@@ -11,13 +11,13 @@ CREATE TABLE IF NOT EXISTS rag_text_chunks (
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
-CREATE INDEX IF NOT EXISTS rag_text_chunks_document_id_idx
-    ON rag_text_chunks (document_id);
+CREATE INDEX IF NOT EXISTS "{{table_name}}_document_id_idx"
+    ON "{{table_name}}" (document_id);
 
-CREATE INDEX IF NOT EXISTS rag_text_chunks_metadata_idx
-    ON rag_text_chunks USING GIN (metadata jsonb_path_ops);
+CREATE INDEX IF NOT EXISTS "{{table_name}}_metadata_idx"
+    ON "{{table_name}}" USING GIN (metadata jsonb_path_ops);
 
-CREATE INDEX IF NOT EXISTS rag_text_chunks_bm25_idx
-    ON rag_text_chunks
+CREATE INDEX IF NOT EXISTS "{{table_name}}_bm25_idx"
+    ON "{{table_name}}"
     USING bm25 (id, content)
     WITH (key_field = 'id');

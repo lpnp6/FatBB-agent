@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence, Callable
 from dataclasses import asdict
 import json
 import logging
+from pathlib import Path
 import re
 from typing import LiteralString
 
@@ -44,6 +45,20 @@ class PostgresBM25SearchStore(BM25SearchStore):
             logger.exception("PostgreSQL database connection check failed")
             raise
         logger.info("PostgreSQL database connection verified")
+
+    def migrate(self) -> None:
+        """Apply the bundled PostgreSQL migrations to this store's table."""
+        with self._connect() as connection, connection.cursor() as cursor:
+            for path in self._migration_paths():
+                cursor.execute(self._migration_sql(path.read_text(encoding="utf-8")))
+
+    def _migration_paths(self) -> list[Path]:
+        migrations = Path(__file__).resolve().parents[4] / "migrations" / "postgres"
+        return sorted(migrations.glob("*.sql"))
+
+    def _migration_sql(self, script: str) -> str:
+        """Substitute the validated table name into a migration template."""
+        return script.replace("{{table_name}}", self._table_name)
 
     def list_chunks(self, *, filters: Mapping[str, object]) -> list[TextChunk]:
         query = self._query(

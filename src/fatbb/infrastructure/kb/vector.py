@@ -26,6 +26,9 @@ class PostgresVectorKnowledgeBase(KnowledgeBaseAdapter):
         """Verify PostgreSQL is reachable before source files are read."""
         self._store(config).check_connection()
 
+    def migrate(self, config: KnowledgeBaseConfig) -> None:
+        self._store(config).migrate()
+
     def indexer(self, config: KnowledgeBaseConfig) -> VectorIndexer:
         """Build an indexer whose store generates Ollama embeddings on write."""
         return VectorIndexer(MarkdownChunker(), self._store(config))

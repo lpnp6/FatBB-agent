@@ -159,13 +159,12 @@ class BM25SearchStore(TextChunkStore):
 - executes `pg_search` BM25 queries in the database;
 - applies JSONB metadata filters before ranking, sorts by backend score, and limits results in the database.
 
-Database objects are created only by the versioned migration, never by the application:
+Database objects are created from versioned migrations when a knowledge base is created.
 
-```bash
-psql "$DATABASE_URL" -f migrations/postgres/0001_create_rag_text_chunks.sql
-```
-
-The migration creates the `pg_search` extension, `rag_text_chunks`, indexes for document IDs and metadata, and the BM25 index. The runtime connection requires a PostgreSQL environment that supports `pg_search`, such as ParadeDB.
+The migration templates receive the configured store table name and create the
+`pg_search` extension, table, indexes for document IDs and metadata, and the
+BM25 index. The runtime connection requires a PostgreSQL environment that
+supports `pg_search`, such as ParadeDB.
 
 ## Operational behavior
 
@@ -173,7 +172,7 @@ Metadata filters are flat, serializable equality constraints such as `tenant_id`
 
 Reindexing an existing document is idempotent with respect to the emitted chunks: chunks no longer produced by the chunker are removed in the same storage transaction. Deleting a source document removes all of its chunks.
 
-No DDL is executed at runtime. The store lazily imports `psycopg`, allowing pure model and contract tests to run without importing the database driver during module loading.
+The store lazily imports `psycopg`, allowing pure model and contract tests to run without importing the database driver during module loading.
 
 ## Testing and gaps
 

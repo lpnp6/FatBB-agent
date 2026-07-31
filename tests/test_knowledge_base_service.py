@@ -51,6 +51,9 @@ class RecordingAdapter:
         if self.fail_connection:
             raise ConnectionError("database is unavailable")
 
+    def migrate(self, database_url: str) -> None:
+        self.events.append("migrate")
+
     def indexer(self, database_url: str):
         return self
 
@@ -86,7 +89,7 @@ class KnowledgeBaseServiceTests(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["check_connection", "save_configuration", "load", "upsert_documents"],
+            ["check_connection", "migrate", "save_configuration", "load", "upsert_documents"],
         )
         self.assertEqual(len(repository.created), 1)
 
@@ -101,7 +104,7 @@ class KnowledgeBaseServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "loading was interrupted"):
             service.create("Docs", "bm25", "pg", "postgresql://db", "file_path", "/source")
 
-        self.assertEqual(events, ["check_connection", "save_configuration", "load"])
+        self.assertEqual(events, ["check_connection", "migrate", "save_configuration", "load"])
         self.assertEqual(len(repository.created), 1)
 
     def test_does_not_load_documents_when_connection_check_fails(self) -> None:
