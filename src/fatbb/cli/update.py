@@ -29,6 +29,25 @@ def update(
     if page.interaction == "progress":
         return Transition(state)
 
+    # ── text pages with a back route ──────────────────────────────────
+    if page.interaction == "text" and page.back_route is not None:
+        if isinstance(event, InputChanged):
+            # Typing auto-switches to input mode.
+            return Transition(replace(state, input_text=event.text, selected_index=1))
+        if event.key == "escape":
+            return Transition(replace(state, screen=page.back_route, selected_index=0, input_text=""))
+        if event.key in {"up", "down"}:
+            delta = -1 if event.key == "up" else 1
+            return Transition(replace(state, selected_index=(state.selected_index + delta) % 2))
+        if event.key == "enter":
+            if state.selected_index == 0:
+                # User selected the back item.
+                return Transition(replace(state, screen=page.back_route, selected_index=0, input_text=""))
+            if page.submit_action is None:
+                return Transition(state)
+            return Transition(state, UiAction(page.submit_action, state.input_text))
+        return Transition(state)
+
     if isinstance(event, InputChanged):
         if state.screen == home_page and event.text == "/":
             return Transition(replace(state, screen=palette_page, input_text="/", selected_index=0))

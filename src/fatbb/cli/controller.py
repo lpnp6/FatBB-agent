@@ -67,6 +67,9 @@ class CliController:
 
     def items(self) -> tuple[str, ...]:
         """Resolve the active page's configured item source."""
+        page = self._config.page(self.state.screen)
+        if page.interaction == "text" and page.back_route is not None:
+            return ("← Back",)
         choices = self._config.menu_items(self.state.screen)
         if choices is not None:
             return tuple(cast(str, choice.label) for choice in choices)

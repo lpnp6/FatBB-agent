@@ -29,10 +29,10 @@ def body(controller: CliController) -> HTML:
             parts.extend(("", *state.lines))
     elif state.status.startswith("Error:"):
         parts.append(state.status)
-    if controller.items() and not controller.is_palette_page():
-        parts.extend(("", _menu_text(controller)))
     if hint := controller.page_hint():
         parts.append(hint)
+    if controller.items() and not controller.is_palette_page():
+        parts.extend(("", _menu_text(controller)))
     return HTML("\n".join(_escape(part) for part in parts))
 
 

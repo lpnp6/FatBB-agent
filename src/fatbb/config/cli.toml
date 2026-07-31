@@ -85,6 +85,7 @@ submit_action = "set_database_type"
 [pages.database_url]
 interaction = "text"
 submit_action = "set_database_url"
+back_route = "database_type"
 hint = "Enter a database connection URL. It will be stored with the knowledge base."
 
 [pages.embedding_provider]
@@ -100,6 +101,7 @@ submit_action = "set_embedding_model"
 [pages.embedding_url]
 interaction = "text"
 submit_action = "set_embedding_url"
+back_route = "embedding_model"
 hint = "Enter the Ollama URL, for example http://localhost:11434."
 
 [pages.source_type]
@@ -110,11 +112,13 @@ submit_action = "set_source_type"
 [pages.knowledge_base_name]
 interaction = "text"
 submit_action = "set_knowledge_base_name"
+back_route = "source_type"
 hint = "Enter a knowledge base name."
 
 [pages.source_path]
 interaction = "text"
 submit_action = "create_knowledge_base"
+back_route = "knowledge_base_name"
 hint = "Enter a local .md, .markdown, or .txt file or directory path."
 
 [pages.indexing]

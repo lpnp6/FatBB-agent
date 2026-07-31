@@ -29,10 +29,12 @@ class Command:
 class Page:
     """A configured page and the interaction it accepts."""
 
-    def __init__(self, interaction: str, submit_action: str | None = None, hint: str | None = None):
+    def __init__(self, interaction: str, submit_action: str | None = None, hint: str | None = None,
+                 back_route: str | None = None):
         self.interaction = interaction
         self.submit_action = submit_action
         self.hint = hint
+        self.back_route = back_route
 
 
 class CliConfig:
@@ -97,13 +99,16 @@ class CliConfig:
                 raise ValueError(f"CLI page {name!r} submit_action must be a string.")
             if hint is not None and not isinstance(hint, str):
                 raise ValueError(f"CLI page {name!r} hint must be a string.")
+            back_route = raw_page.get("back_route")
+            if back_route is not None and not isinstance(back_route, str):
+                raise ValueError(f"CLI page {name!r} back_route must be a string.")
             if isinstance(item_source, str):
                 self._page_sources[name] = item_source
             elif isinstance(menu, str):
                 self._page_menus[name] = menu
             elif interaction == "menu":
                 raise ValueError(f"CLI menu page {name!r} requires item_source or menu.")
-            self._pages[name] = Page(interaction, submit_action, hint)
+            self._pages[name] = Page(interaction, submit_action, hint, back_route)
 
         for page_name in (self.home_page, self.palette_page):
             if page_name not in self._pages:
