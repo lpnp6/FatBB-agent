@@ -6,18 +6,65 @@ from collections.abc import Mapping, Sequence, Callable
 from dataclasses import asdict
 import json
 import logging
+import os
 from pathlib import Path
 import re
-from typing import LiteralString
+from typing import TYPE_CHECKING, LiteralString
 
 from ...interfaces.stores import BM25SearchStore
 from ...models.common import SourceRef
 from ...models.document import ScoredTextChunk, TextChunk
 
+if TYPE_CHECKING:
+    import psycopg_pool
+
 
 logger = logging.getLogger(__name__)
 
 BASE_MIGRATIONS = ("0001_create_rag_text_chunks.sql",)
+
+# Per-DSN connection pools shared across all store instances.
+_pools: dict[str, psycopg_pool.ConnectionPool] = {}
+_DEFAULT_POOL_MIN = 1
+_DEFAULT_POOL_MAX = 10
+_DEFAULT_CONNECT_TIMEOUT = 10  # seconds — avoids hanging on IPv6 fallback
+
+
+def _normalize_dsn(dsn: str) -> str:
+    """On Windows, replace *localhost* with ``127.0.0.1`` to bypass the
+    IPv6 (``::1``) → IPv4 fallback penalty that ``libpq`` incurs when
+    PostgreSQL is not bound to IPv6.
+
+    Handles both URI (``postgresql://...@localhost:...``) and key=value
+    (``host=localhost ...``) connection-string formats.
+    """
+    if os.name != "nt":
+        return dsn
+    # URI format: postgresql://user:pass@localhost:5432/db
+    dsn = re.sub(r"(?<=@)localhost(?=[:/]|$)", "127.0.0.1", dsn)
+    # key=value format: host=localhost port=5432 dbname=...
+    dsn = re.sub(r"\bhost=localhost\b", "host=127.0.0.1", dsn)
+    return dsn
+
+
+def _get_pool(dsn: str):
+    """Return a cached :class:`psycopg_pool.ConnectionPool` for *dsn*.
+
+    The pool is created lazily on first use and survives for the
+    lifetime of the process, which is appropriate for the CLI's
+    short-lived run model.
+    """
+    dsn = _normalize_dsn(dsn)
+    if dsn not in _pools:
+        import psycopg_pool
+
+        _pools[dsn] = psycopg_pool.ConnectionPool(
+            dsn,
+            min_size=_DEFAULT_POOL_MIN,
+            max_size=_DEFAULT_POOL_MAX,
+            kwargs={"connect_timeout": _DEFAULT_CONNECT_TIMEOUT},
+        )
+    return _pools[dsn]
 
 
 class PostgresBM25SearchStore(BM25SearchStore):
@@ -229,7 +276,18 @@ class PostgresBM25SearchStore(BM25SearchStore):
                 "PostgreSQL support requires psycopg. Install dependencies with "
                 "`pip install -r requirements.txt`."
             ) from error
-        return psycopg.connect(self._dsn)
+        # Pool-level timeout slightly exceeds connect_timeout so a single
+        # connection attempt can fail and be retried once without the user
+        # waiting the full 30 s default.
+        pool = _get_pool(self._dsn)
+        try:
+            return pool.connection(timeout=_DEFAULT_CONNECT_TIMEOUT + 5)
+        except Exception:
+            logger.exception(
+                "Cannot get a PostgreSQL connection from pool for %r",
+                _normalize_dsn(self._dsn),
+            )
+            raise
 
     def _query(self, template: LiteralString):
         """Safely interpolate the configured table identifier into SQL."""
