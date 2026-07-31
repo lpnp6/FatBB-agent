@@ -170,6 +170,8 @@ def create_knowledge_base(controller: CliController, value: str | None) -> None:
     # Show the user that work has started immediately.
     controller.state = replace(
         controller.state,
+        screen=controller._config.route("knowledge_base_indexing"),
+        input_text="",
         status="Indexing documents…",
         progress="Starting…",
     )
@@ -193,6 +195,8 @@ def create_knowledge_base(controller: CliController, value: str | None) -> None:
         except Exception as exc:
             controller.state = replace(
                 controller.state,
+                screen=controller._config.route("indexing_failed"),
+                input_text="",
                 status=f"Error: {exc}",
                 progress="",
             )

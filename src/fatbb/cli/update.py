@@ -26,6 +26,9 @@ def update(
     home_page: str, palette_page: str, item_count: int = 1,
 ) -> Transition:
     """Return the next state without calling an adapter or terminal API."""
+    if page.interaction == "progress":
+        return Transition(state)
+
     if isinstance(event, InputChanged):
         if state.screen == home_page and event.text == "/":
             return Transition(replace(state, screen=palette_page, input_text="/", selected_index=0))

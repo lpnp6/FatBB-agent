@@ -19,12 +19,16 @@ def body(controller: CliController) -> HTML:
     # retrieval results in state, but do not append a new menu beneath them.
     # Returning to CHAT makes the unchanged transcript visible again.
     parts: list[str] = []
-    if controller.is_home_page():
+    if controller.is_progress_page():
+        parts.extend(("Creating knowledge base", state.progress or "Starting…"))
+    elif controller.is_home_page():
         parts.append(state.status)
         if state.progress:
             parts.append(f"  {state.progress}")
         if state.lines:
             parts.extend(("", *state.lines))
+    elif state.status.startswith("Error:"):
+        parts.append(state.status)
     if controller.items() and not controller.is_palette_page():
         parts.extend(("", _menu_text(controller)))
     if hint := controller.page_hint():
@@ -38,7 +42,7 @@ def palette(controller: CliController) -> HTML:
 
 
 def prompt(controller: CliController) -> str:
-    return "FatBB > "
+    return "" if controller.is_progress_page() else "FatBB > "
 
 
 def _menu_text(controller: CliController) -> str:

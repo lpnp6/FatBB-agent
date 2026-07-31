@@ -115,6 +115,11 @@ hint = "Enter a knowledge base name."
 [pages.source_path]
 interaction = "text"
 submit_action = "create_knowledge_base"
+hint = "Enter a local .md, .markdown, or .txt file or directory path."
+
+[pages.indexing]
+interaction = "progress"
+hint = "Please wait. Input and navigation are disabled while the knowledge base is created."
 
 [routes]
 open_knowledge_base_menu = "knowledge_base_menu"
@@ -140,6 +145,8 @@ database_type_next = "database_url"
 source_type = "source_type"
 source_type_back = "database_url"
 source_type_next = "knowledge_base_name"
+knowledge_base_indexing = "indexing"
+indexing_failed = "source_path"
 
 # State-machine action names are mapped to trusted, source-controlled handler
 # functions. The controller imports these paths only when an action is raised.

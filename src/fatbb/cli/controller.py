@@ -110,6 +110,10 @@ class CliController:
         """Whether the active page is the configured command palette."""
         return self.state.screen == self._config.palette_page
 
+    def is_progress_page(self) -> bool:
+        """Whether a background knowledge-base creation task owns the UI."""
+        return self._config.page(self.state.screen).interaction == "progress"
+
     def page_hint(self) -> str | None:
         """Return the active page's optional presentation hint."""
         return self._config.page(self.state.screen).hint

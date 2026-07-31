@@ -16,6 +16,7 @@ class CliViewTests(unittest.TestCase):
             items=lambda: ("Knowledge Base",),
             is_home_page=lambda: False,
             is_palette_page=lambda: True,
+            is_progress_page=lambda: False,
             page_hint=lambda: None,
         )
 
@@ -26,6 +27,21 @@ class CliViewTests(unittest.TestCase):
         self.assertNotIn("Knowledge Base", chat_text)
         self.assertIn("Command palette", palette_text)
         self.assertIn("> Knowledge Base", palette_text)
+
+    def test_progress_page_shows_progress(self) -> None:
+        controller = SimpleNamespace(
+            state=UiState(screen="indexing", progress="Chunking documents: 1/2"),
+            items=lambda: (),
+            is_home_page=lambda: False,
+            is_palette_page=lambda: False,
+            is_progress_page=lambda: True,
+            page_hint=lambda: "Please wait.",
+        )
+
+        page_text = _plain_text(body(controller))
+
+        self.assertIn("Creating knowledge base", page_text)
+        self.assertIn("Chunking documents: 1/2", page_text)
 
 
 def _plain_text(value: object) -> str:

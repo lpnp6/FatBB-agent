@@ -121,6 +121,14 @@ def main() -> None:
 
     @key_bindings.add("c-d")
     def _exit(event) -> None:
+        if controller.is_progress_page():
+            return
+        event.app.exit()
+
+    @key_bindings.add("c-c")
+    def _interrupt(event) -> None:
+        if controller.is_progress_page():
+            return
         event.app.exit()
 
     # The chat surface always remains mounted. The slash-command palette is a
@@ -130,11 +138,16 @@ def main() -> None:
         [
             Window(FormattedTextControl(lambda: header(controller)), height=1),
             Window(FormattedTextControl(lambda: body(controller)), wrap_lines=True),
-            Window(height=1, char="─"),
-            Window(
-                BufferControl(buffer=buffer, focusable=True),
-                height=Dimension.exact(1),
-                get_line_prefix=lambda _line, _wrap: [("class:prompt", prompt(controller))],
+            ConditionalContainer(
+                HSplit([
+                    Window(height=1, char="─"),
+                    Window(
+                        BufferControl(buffer=buffer, focusable=True),
+                        height=Dimension.exact(1),
+                        get_line_prefix=lambda _line, _wrap: [("class:prompt", prompt(controller))],
+                    ),
+                ]),
+                filter=Condition(lambda: not controller.is_progress_page()),
             ),
         ]
     )

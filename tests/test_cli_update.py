@@ -53,3 +53,12 @@ class CliUpdateTests(unittest.TestCase):
         self.assertEqual(transition.state.screen, "database_type")
         self.assertIsNotNone(transition.action)
         self.assertEqual(transition.action.kind, "set_database_type")
+
+    def test_progress_page_ignores_input_and_navigation(self) -> None:
+        state = UiState(screen="indexing")
+        page = Page("progress")
+
+        for event in (InputChanged("cancel"), KeyPressed("escape"), KeyPressed("enter")):
+            transition = self._update(state, event, page=page)
+            self.assertEqual(transition.state, state)
+            self.assertIsNone(transition.action)
