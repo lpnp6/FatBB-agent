@@ -24,6 +24,10 @@ class KnowledgeBaseConfig:
     database_url: str
     # The ingestion adapter key. ``file_path`` imports local text files.
     source_type: str
+    # Embedding provider configuration is required by vector retrieval only.
+    embedding_provider: str | None = None
+    embedding_model: str | None = None
+    embedding_url: str | None = None
 
 
 @dataclass(frozen=True)

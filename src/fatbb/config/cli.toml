@@ -20,12 +20,25 @@ items = [
 [menus.retrieval_type]
 items = [
   { value = "bm25", label = "BM25" },
+  { value = "vector", label = "Vector" },
   { value = "back", label = "Back" },
 ]
 
 [menus.database_type]
 items = [
   { value = "pg", label = "PostgreSQL" },
+  { value = "back", label = "Back" },
+]
+
+[menus.embedding_provider]
+items = [
+  { value = "ollama", label = "Ollama" },
+  { value = "back", label = "Back" },
+]
+
+[menus.embedding_model]
+items = [
+  { value = "nomic-embed-text", label = "nomic-embed-text" },
   { value = "back", label = "Back" },
 ]
 
@@ -74,6 +87,21 @@ interaction = "text"
 submit_action = "set_database_url"
 hint = "Enter a database connection URL. It will be stored with the knowledge base."
 
+[pages.embedding_provider]
+menu = "embedding_provider"
+interaction = "menu"
+submit_action = "set_embedding_provider"
+
+[pages.embedding_model]
+menu = "embedding_model"
+interaction = "menu"
+submit_action = "set_embedding_model"
+
+[pages.embedding_url]
+interaction = "text"
+submit_action = "set_embedding_url"
+hint = "Enter the Ollama URL, for example http://localhost:11434."
+
 [pages.source_type]
 menu = "source_type"
 interaction = "menu"
@@ -95,6 +123,14 @@ open_knowledge_base_creation = "retrieval_type"
 existing_knowledge_bases_back = "knowledge_base_menu"
 knowledge_base_name_next = "source_path"
 database_url_next = "source_type"
+database_url_vector_next = "embedding_provider"
+embedding_provider = "embedding_provider"
+embedding_provider_back = "database_url"
+embedding_provider_next = "embedding_model"
+embedding_model = "embedding_model"
+embedding_model_back = "embedding_provider"
+embedding_model_next = "embedding_url"
+embedding_url_next = "source_type"
 retrieval_type = "retrieval_type"
 retrieval_type_back = "knowledge_base_menu"
 retrieval_type_next = "database_type"
@@ -121,6 +157,15 @@ handler = "fatbb.cli.actions:set_knowledge_base_name"
 
 [actions.set_database_url]
 handler = "fatbb.cli.actions:set_database_url"
+
+[actions.set_embedding_provider]
+handler = "fatbb.cli.actions:set_embedding_provider"
+
+[actions.set_embedding_model]
+handler = "fatbb.cli.actions:set_embedding_model"
+
+[actions.set_embedding_url]
+handler = "fatbb.cli.actions:set_embedding_url"
 
 [actions.set_retrieval_type]
 handler = "fatbb.cli.actions:set_retrieval_type"

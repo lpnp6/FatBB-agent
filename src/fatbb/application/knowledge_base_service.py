@@ -36,6 +36,9 @@ class KnowledgeBaseService:
     def create(
         self, name: str, retrieval_type: str, database_type: str, database_url: str,
         source_type: str, source_path: str, *,
+        embedding_provider: str | None = None,
+        embedding_model: str | None = None,
+        embedding_url: str | None = None,
         on_progress: Callable[[str, int, int], None] | None = None,
     ) -> KnowledgeBase:
         """Validate and persist configuration, then import and index a source.
@@ -50,11 +53,18 @@ class KnowledgeBaseService:
             raise ValueError("Knowledge base name cannot be empty.")
         if not database_url.strip():
             raise ValueError("Database URL cannot be empty.")
+        if retrieval_type == "vector" and (
+            not embedding_provider or not embedding_model or not embedding_url
+        ):
+            raise ValueError("Vector knowledge bases require an embedding provider, model, and URL.")
 
         # Capture adapter choices and the per-knowledge-base database URL.
         config = KnowledgeBaseConfig(
             retrieval_type=retrieval_type, database_type=database_type,
             database_url=database_url.strip(), source_type=source_type,
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model,
+            embedding_url=embedding_url.strip() if embedding_url else None,
         )
         knowledge_base = KnowledgeBase(
             id=str(uuid4()), name=normalized_name, config=config, source_path=source_path
@@ -68,7 +78,7 @@ class KnowledgeBaseService:
         if on_progress is not None:
             on_progress("Connecting to database", 0, 1)
         try:
-            adapter.check_connection(config.database_url)
+            adapter.check_connection(config)
             if on_progress is not None:
                 on_progress("Database connection successful", 1, 1)
         except Exception as error:
@@ -98,7 +108,7 @@ class KnowledgeBaseService:
             "Indexing source documents",
             extra={"knowledge_base": knowledge_base.name, "document_count": len(documents)},
         )
-        adapter.indexer(config.database_url).upsert_documents(documents, on_progress=on_progress)
+        adapter.indexer(config).upsert_documents(documents, on_progress=on_progress)
         logger.info(
             "Knowledge base created",
             extra={"knowledge_base": knowledge_base.name, "document_count": len(documents)},
@@ -114,9 +124,7 @@ class KnowledgeBaseService:
         )
         return self._registry.knowledge_base(
             knowledge_base.config.retrieval_type, knowledge_base.config.database_type
-        ).retriever(
-            knowledge_base.config.database_url
-        ).retrieve(
+        ).retriever(knowledge_base.config).retrieve(
             RetrievalQuery(
                 text=question,
                 # Keyword retrieval is the initial supported query strategy.

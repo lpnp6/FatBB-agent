@@ -121,6 +121,21 @@ class Local:
                     database_type=str(config["database_type"]),
                     database_url=str(config["database_url"]),
                     source_type=str(config["source_type"]),
+                    embedding_provider=(
+                        str(config["embedding_provider"])
+                        if config.get("embedding_provider") is not None
+                        else None
+                    ),
+                    embedding_model=(
+                        str(config["embedding_model"])
+                        if config.get("embedding_model") is not None
+                        else None
+                    ),
+                    embedding_url=(
+                        str(config["embedding_url"])
+                        if config.get("embedding_url") is not None
+                        else None
+                    ),
                 ),
                 source_path=str(value["source_path"]),
             )

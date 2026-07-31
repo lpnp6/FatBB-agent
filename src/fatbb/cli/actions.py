@@ -79,7 +79,7 @@ def set_database_url(controller: CliController, value: str | None) -> None:
         ]
         if url_lines:
             database_url = url_lines[-1]
-            _show(controller, "database_url_next", pending_database_url=database_url,
+            _show(controller, _database_url_next_route(controller), pending_database_url=database_url,
                   status="URL extracted from multi-line paste.")
             return
         # Fall back to collapsing all whitespace when no URI line is found.
@@ -87,10 +87,35 @@ def set_database_url(controller: CliController, value: str | None) -> None:
         if not collapsed:
             raise ValueError("Database URL cannot be empty.")
         database_url = collapsed
-        _show(controller, "database_url_next", pending_database_url=database_url,
+        _show(controller, _database_url_next_route(controller), pending_database_url=database_url,
               status="URL whitespace was collapsed.")
         return
-    _show(controller, "database_url_next", pending_database_url=database_url)
+    _show(controller, _database_url_next_route(controller), pending_database_url=database_url)
+
+
+def set_embedding_provider(controller: CliController, value: str | None) -> None:
+    choices = controller._config.menu_items(controller._config.route("embedding_provider")) or ()
+    provider = choices[int(value or "0")].value
+    if provider == "back":
+        _show(controller, "embedding_provider_back")
+        return
+    _show(controller, "embedding_provider_next", pending_embedding_provider=provider)
+
+
+def set_embedding_model(controller: CliController, value: str | None) -> None:
+    choices = controller._config.menu_items(controller._config.route("embedding_model")) or ()
+    model = choices[int(value or "0")].value
+    if model == "back":
+        _show(controller, "embedding_model_back")
+        return
+    _show(controller, "embedding_model_next", pending_embedding_model=model)
+
+
+def set_embedding_url(controller: CliController, value: str | None) -> None:
+    embedding_url = (value or "").strip()
+    if not embedding_url:
+        raise ValueError("Embedding URL cannot be empty.")
+    _show(controller, "embedding_url_next", pending_embedding_url=embedding_url)
 
 
 def set_retrieval_type(controller: CliController, value: str | None) -> None:
@@ -137,6 +162,9 @@ def create_knowledge_base(controller: CliController, value: str | None) -> None:
     pending_retrieval_type = state.pending_retrieval_type
     pending_database_type = state.pending_database_type
     pending_database_url = state.pending_database_url
+    pending_embedding_provider = state.pending_embedding_provider
+    pending_embedding_model = state.pending_embedding_model
+    pending_embedding_url = state.pending_embedding_url
     pending_source_type = state.pending_source_type
 
     # Show the user that work has started immediately.
@@ -153,6 +181,9 @@ def create_knowledge_base(controller: CliController, value: str | None) -> None:
             kb = controller._service.create(
                 pending_name, pending_retrieval_type, pending_database_type,
                 pending_database_url, pending_source_type, source_path,
+                embedding_provider=pending_embedding_provider or None,
+                embedding_model=pending_embedding_model or None,
+                embedding_url=pending_embedding_url or None,
                 on_progress=controller.report_progress,
             )
             _activate(controller, kb, f'Indexed and selected "{kb.name}".')
@@ -225,4 +256,12 @@ def _show(controller: CliController, route: str, **changes: object) -> None:
         input_text="",
         selected_index=0,
         **changes,
+    )
+
+
+def _database_url_next_route(controller: CliController) -> str:
+    return (
+        "database_url_vector_next"
+        if controller.state.pending_retrieval_type == "vector"
+        else "database_url_next"
     )

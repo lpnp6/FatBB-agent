@@ -27,3 +27,25 @@ class LocalTests(unittest.TestCase):
             self.assertEqual(local.list_knowledge_bases(), [knowledge_base])
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+
+    def test_persists_vector_embedding_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            local = Local(Path(directory) / "knowledge_bases.json")
+            knowledge_base = KnowledgeBase(
+                id="kb-vector",
+                name="Vector Docs",
+                config=KnowledgeBaseConfig(
+                    retrieval_type="vector",
+                    database_type="pg",
+                    database_url="postgresql://localhost/fatbb",
+                    source_type="file_path",
+                    embedding_provider="ollama",
+                    embedding_model="nomic-embed-text",
+                    embedding_url="http://localhost:11434",
+                ),
+                source_path="/tmp/docs",
+            )
+
+            local.create_knowledge_base(knowledge_base)
+
+            self.assertEqual(local.list_knowledge_bases(), [knowledge_base])
