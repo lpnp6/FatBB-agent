@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
+import time
 from collections.abc import Mapping, Sequence
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from ..interfaces.client import EmbeddingClient
 
+logger = logging.getLogger(__name__)
+
 # Texts per HTTP request to Ollama.  Keeps payload under ~3 MB for the
 # nomic-embed-text model (max 2048 tokens ≈ ~8 KB per text).
 _BATCH_SIZE = 64
+_MAX_RETRIES = 3
 
 
 class OllamaEmbeddingClient(EmbeddingClient):
@@ -69,22 +74,98 @@ class OllamaEmbeddingClient(EmbeddingClient):
         """Generate embeddings for *texts*, splitting into sub-batches."""
         if not texts:
             return []
-        results: list[list[float]] = []
-        for i in range(0, len(texts), _BATCH_SIZE):
-            sub = texts[i : i + _BATCH_SIZE]
-            results.extend(self._batch_request(sub))
-        return results
-
-    async def a_batch_embedding(self, texts: Sequence[str]) -> list[list[float]]:
-        """Generate embeddings for *texts* with sub-batches sent concurrently."""
-        if not texts:
-            return []
-        tasks = [
-            asyncio.to_thread(self._batch_request, texts[i : i + _BATCH_SIZE])
+        sub_batches = [
+            texts[i : i + _BATCH_SIZE]
             for i in range(0, len(texts), _BATCH_SIZE)
         ]
-        batches: list[list[list[float]]] = await asyncio.gather(*tasks)
-        return [vec for batch in batches for vec in batch]
+        t0 = time.monotonic()
+        logger.info(
+            "Starting sync batch embedding: %d texts in %d sub-batches",
+            len(texts), len(sub_batches),
+        )
+        ordered: list[object] = [None] * len(sub_batches)
+        for idx, batch in enumerate(sub_batches):
+            ordered[idx] = self._batch_with_retry(batch)
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "Sync batch embedding complete: %d vectors in %.1fs (%.0f ms/text)",
+            len(texts), elapsed, elapsed / len(texts) * 1000,
+        )
+        return [vec for batch in ordered for vec in batch]  # type: ignore[misc]
+
+    async def a_batch_embedding(self, texts: Sequence[str]) -> list[list[float]]:
+        """Generate embeddings for *texts* with sub-batches sent concurrently.
+
+        Failed sub-batches are retried automatically; other batches
+        keep running and are not cancelled.
+        """
+        if not texts:
+            return []
+        sub_batches = [
+            texts[i : i + _BATCH_SIZE]
+            for i in range(0, len(texts), _BATCH_SIZE)
+        ]
+        t0 = time.monotonic()
+        logger.info(
+            "Starting async batch embedding: %d texts in %d sub-batches",
+            len(texts), len(sub_batches),
+        )
+        ordered: list[object] = [None] * len(sub_batches)
+        pending: list[tuple[int, Sequence[str]]] = list(enumerate(sub_batches))
+
+        for attempt in range(_MAX_RETRIES):
+            if not pending:
+                break
+            if attempt > 0:
+                logger.warning(
+                    "Retry attempt %d/%d: %d sub-batches remaining",
+                    attempt + 1, _MAX_RETRIES, len(pending),
+                )
+            tasks = [
+                asyncio.to_thread(self._batch_request, batch)
+                for _, batch in pending
+            ]
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            still_pending: list[tuple[int, Sequence[str]]] = []
+            for (idx, _), outcome in zip(pending, outcomes):
+                if isinstance(outcome, BaseException):
+                    logger.warning(
+                        "Sub-batch %d failed (attempt %d/%d): %s",
+                        idx, attempt + 1, _MAX_RETRIES, outcome,
+                    )
+                    still_pending.append((idx, sub_batches[idx]))
+                else:
+                    ordered[idx] = outcome
+            pending = still_pending
+
+        if pending:
+            failed = [str(idx) for idx, _ in pending]
+            raise RuntimeError(
+                f"{len(pending)} sub-batches failed after "
+                f"{_MAX_RETRIES} retries (indices: {', '.join(failed)})"
+            )
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "Async batch embedding complete: %d vectors in %.1fs (%.0f ms/text)",
+            len(texts), elapsed, elapsed / len(texts) * 1000,
+        )
+        return [vec for batch in ordered for vec in batch]  # type: ignore[misc]
+
+    def _batch_with_retry(self, texts: Sequence[str]) -> list[list[float]]:
+        """Send one batch, retrying on transient errors."""
+        last: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                return self._batch_request(texts)
+            except RuntimeError as exc:
+                last = exc
+                logger.warning(
+                    "Batch request failed (attempt %d/%d, %d texts): %s",
+                    attempt + 1, _MAX_RETRIES, len(texts), exc,
+                )
+        raise RuntimeError(
+            f"Sub-batch failed after {_MAX_RETRIES} retries: {last}"
+        ) from last
 
     def _batch_request(self, texts: Sequence[str]) -> list[list[float]]:
         """Send one batch request and return validated embedding vectors."""
