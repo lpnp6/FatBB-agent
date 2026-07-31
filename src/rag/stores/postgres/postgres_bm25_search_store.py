@@ -17,6 +17,8 @@ from ...models.document import ScoredTextChunk, TextChunk
 
 logger = logging.getLogger(__name__)
 
+BASE_MIGRATIONS = ("0001_create_rag_text_chunks.sql",)
+
 
 class PostgresBM25SearchStore(BM25SearchStore):
     """Persist chunks and execute pg_search BM25 queries through psycopg 3.
@@ -46,19 +48,36 @@ class PostgresBM25SearchStore(BM25SearchStore):
             raise
         logger.info("PostgreSQL database connection verified")
 
-    def migrate(self) -> None:
+    def migrate(
+        self, *, scripts: Sequence[str] = BASE_MIGRATIONS,
+        embedding_dimension: int | None = None,
+    ) -> None:
         """Apply the bundled PostgreSQL migrations to this store's table."""
+        if embedding_dimension is not None and embedding_dimension < 1:
+            raise ValueError("embedding_dimension must be positive")
         with self._connect() as connection, connection.cursor() as cursor:
-            for path in self._migration_paths():
-                cursor.execute(self._migration_sql(path.read_text(encoding="utf-8")))
+            for path in self._migration_paths(scripts):
+                cursor.execute(
+                    self._migration_sql(
+                        path.read_text(encoding="utf-8"), embedding_dimension
+                    )
+                )
 
-    def _migration_paths(self) -> list[Path]:
+    def _migration_paths(self, scripts: Sequence[str]) -> list[Path]:
         migrations = Path(__file__).resolve().parents[4] / "migrations" / "postgres"
-        return sorted(migrations.glob("*.sql"))
+        paths = [migrations / script for script in scripts]
+        if any(not path.is_file() for path in paths):
+            raise ValueError("unknown PostgreSQL migration script")
+        return paths
 
-    def _migration_sql(self, script: str) -> str:
-        """Substitute the validated table name into a migration template."""
-        return script.replace("{{table_name}}", self._table_name)
+    def _migration_sql(self, script: str, embedding_dimension: int | None) -> str:
+        """Substitute validated migration variables into a SQL template."""
+        rendered = script.replace("{{table_name}}", self._table_name)
+        if embedding_dimension is not None:
+            rendered = rendered.replace("{{embedding_dimension}}", str(embedding_dimension))
+        if "{{" in rendered:
+            raise ValueError("migration requires an embedding dimension")
+        return rendered
 
     def list_chunks(self, *, filters: Mapping[str, object]) -> list[TextChunk]:
         query = self._query(

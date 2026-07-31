@@ -16,6 +16,12 @@ class PostgresVectorKnowledgeBase(KnowledgeBaseAdapter):
     """Compose Ollama embeddings with PostgreSQL pgvector retrieval."""
 
     type = "vector"
+    _EMBEDDING_DIMENSIONS = {"nomic-embed-text": 768}
+    _MIGRATION_SCRIPTS = (
+        "0001_create_rag_text_chunks.sql",
+        "0002_add_rag_text_chunk_embeddings.sql",
+        "0003_add_rag_text_chunk_embedding_hnsw_index.sql",
+    )
 
     def __init__(self, embedding_client_factory: EmbeddingClientFactory | None = None):
         self._embedding_client_factory = (
@@ -27,7 +33,15 @@ class PostgresVectorKnowledgeBase(KnowledgeBaseAdapter):
         self._store(config).check_connection()
 
     def migrate(self, config: KnowledgeBaseConfig) -> None:
-        self._store(config).migrate()
+        try:
+            dimension = self._EMBEDDING_DIMENSIONS[config.embedding_model or ""]
+        except KeyError as error:
+            raise ValueError(
+                f"No embedding dimension is configured for {config.embedding_model!r}."
+            ) from error
+        self._store(config).migrate(
+            scripts=self._MIGRATION_SCRIPTS, embedding_dimension=dimension
+        )
 
     def indexer(self, config: KnowledgeBaseConfig) -> VectorIndexer:
         """Build an indexer whose store generates Ollama embeddings on write."""

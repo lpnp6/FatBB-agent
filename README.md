@@ -45,7 +45,8 @@ export DATABASE_URL='postgresql://user:password@localhost:5432/fatbb'
 When a knowledge base is created, FatBB applies the PostgreSQL migrations to its
 configured database. The migration templates receive the validated table name
 used by the store (currently `rag_text_chunks`) and create the table, metadata
-indexes, BM25 index, vector column, and HNSW index.
+indexes, and BM25 index. Vector knowledge bases additionally create a vector
+column and HNSW index using the dimension configured for their embedding model.
 
 ## Interactive CLI
 
