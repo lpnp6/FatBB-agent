@@ -13,6 +13,7 @@ class RegistryPluginTests(unittest.TestCase):
         registry = CapabilityRegistry(_catalog_path())
 
         self.assertEqual(registry.knowledge_base("bm25", "pg").type, "bm25")
+        self.assertEqual(registry.knowledge_base("vector", "pg").type, "vector")
         self.assertEqual(registry.importer("file_path").type, "file_path")
 
     def test_unknown_type_is_rejected(self) -> None:

@@ -8,5 +8,9 @@
 database_type = "pg"
 factory = "fatbb.infrastructure.kb.bm25:PostgresBm25KnowledgeBase"
 
+[knowledge_bases.vector]
+database_type = "pg"
+factory = "fatbb.infrastructure.kb.vector:PostgresVectorKnowledgeBase"
+
 [importers.file_path]
 factory = "fatbb.infrastructure.importer.local_files:LocalFileImporter"
