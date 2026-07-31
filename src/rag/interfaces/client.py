@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 
 
 class EmbeddingClient(ABC):
@@ -15,3 +16,11 @@ class EmbeddingClient(ABC):
     @abstractmethod
     async def a_embedding(self, text: str) -> list[float]:
         """Generate an embedding vector asynchronously."""
+
+    @abstractmethod
+    def batch_embedding(self, texts: Sequence[str]) -> list[list[float]]:
+        """Generate embeddings for multiple texts in one or more requests."""
+
+    @abstractmethod
+    async def a_batch_embedding(self, texts: Sequence[str]) -> list[list[float]]:
+        """Generate embeddings for multiple texts asynchronously."""

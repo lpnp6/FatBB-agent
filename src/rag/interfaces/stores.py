@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 
@@ -73,3 +74,12 @@ class VectorSearchStore(TextChunkStore):
         filters: Mapping[str, object],
     ) -> list[ScoredTextChunk]:
         """Asynchronosly perform a vector similarity seatch."""
+
+    @abstractmethod
+    async def areplace_document_chunks(
+        self,
+        entries: Sequence[tuple[str, Sequence[TextChunk]]],
+        *,
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ) -> None:
+        """Like :meth:`replace_document_chunks` but safe for async event loops."""

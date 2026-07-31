@@ -19,6 +19,12 @@ class FakeEmbeddingClient(EmbeddingClient):
     async def a_embedding(self, text: str) -> list[float]:
         return [0.25, 0.75]
 
+    def batch_embedding(self, texts):
+        return [[0.25, 0.75] for _ in texts]
+
+    async def a_batch_embedding(self, texts):
+        return [[0.25, 0.75] for _ in texts]
+
 
 class RecordingCursor:
     def __init__(self) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Sequence
 
 from ..interfaces.chunker import Chunker
@@ -33,7 +34,7 @@ class VectorIndexer(Indexer):
             if any(chunk.document_id != document.id for chunk in chunks):
                 raise ValueError("chunker returned a chunk with a mismatched document_id")
             entries.append((document.id, chunks))
-        self._store.replace_document_chunks(entries, on_progress=on_progress)
+        asyncio.run(self._store.areplace_document_chunks(entries, on_progress=on_progress))
 
     def delete_documents(self, document_ids: Sequence[str]) -> None:
         """Remove every vector associated with the supplied documents."""

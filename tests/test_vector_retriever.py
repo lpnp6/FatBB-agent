@@ -36,6 +36,14 @@ class FakeVectorStore(VectorSearchStore):
     ) -> None:
         pass
 
+    async def areplace_document_chunks(
+        self,
+        entries: Sequence[tuple[str, Sequence[TextChunk]]],
+        *,
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ) -> None:
+        self.replace_document_chunks(entries, on_progress=on_progress)
+
     def delete_by_document_ids(self, document_ids: Sequence[str]) -> None:
         pass
 
