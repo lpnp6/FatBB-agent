@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Callable
 from dataclasses import asdict
 import json
 import logging
+import re
+from typing import LiteralString
 
-from ..interfaces.stores import BM25SearchStore
-from ..models.common import SourceRef
-from ..models.document import ScoredTextChunk, TextChunk
+from ...interfaces.stores import BM25SearchStore
+from ...models.common import SourceRef
+from ...models.document import ScoredTextChunk, TextChunk
 
 
 logger = logging.getLogger(__name__)
 
 
-class PostgresTextChunkStore(BM25SearchStore):
+class PostgresBM25SearchStore(BM25SearchStore):
     """Persist chunks and execute pg_search BM25 queries through psycopg 3.
 
     ``psycopg`` is imported only when a database operation occurs, so model and
@@ -24,10 +26,13 @@ class PostgresTextChunkStore(BM25SearchStore):
     ``migrations/postgres/0001_create_rag_text_chunks.sql``.
     """
 
-    def __init__(self, dsn: str):
+    def __init__(self, dsn: str, *, table_name: str = "rag_text_chunks"):
         if not dsn:
             raise ValueError("dsn cannot be empty")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table_name):
+            raise ValueError("table_name must be a valid unqualified SQL identifier")
         self._dsn = dsn
+        self._table_name = table_name
 
     def check_connection(self) -> None:
         """Open and validate a PostgreSQL connection without changing data."""
@@ -41,15 +46,15 @@ class PostgresTextChunkStore(BM25SearchStore):
         logger.info("PostgreSQL database connection verified")
 
     def list_chunks(self, *, filters: Mapping[str, object]) -> list[TextChunk]:
-        query = (
+        query = self._query(
             "SELECT id, document_id, content, chunk_index, source, start_offset, "
-            "end_offset, metadata FROM rag_text_chunks"
+            "end_offset, metadata FROM {table}"
         )
         parameters: tuple[object, ...] = ()
         if filters:
-            query += " WHERE metadata @> %s::jsonb"
+            query += self._query(" WHERE metadata @> %s::jsonb")
             parameters = (json.dumps(dict(filters)),)
-        query += " ORDER BY id"
+        query += self._query(" ORDER BY id")
 
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(query, parameters)
@@ -63,16 +68,16 @@ class PostgresTextChunkStore(BM25SearchStore):
         filters: Mapping[str, object],
     ) -> list[ScoredTextChunk]:
         """Use pg_search to score, sort, and limit matching text chunks."""
-        query = (
+        query = self._query(
             "SELECT id, document_id, content, chunk_index, source, start_offset, "
             "end_offset, metadata, paradedb.score(id) AS score "
-            "FROM rag_text_chunks WHERE content @@@ %s"
+            "FROM {table} WHERE content @@@ %s"
         )
         parameters: list[object] = [query_text]
         if filters:
-            query += " AND metadata @> %s::jsonb"
+            query += self._query(" AND metadata @> %s::jsonb")
             parameters.append(json.dumps(dict(filters)))
-        query += " ORDER BY score DESC, id ASC LIMIT %s"
+        query += self._query(" ORDER BY score DESC, id ASC LIMIT %s")
         parameters.append(top_k)
 
         with self._connect() as connection, connection.cursor() as cursor:
@@ -95,7 +100,10 @@ class PostgresTextChunkStore(BM25SearchStore):
         if not chunk_ids:
             return
         with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute("DELETE FROM rag_text_chunks WHERE id = ANY(%s)", (list(chunk_ids),))
+            cursor.execute(
+                self._query("DELETE FROM {table} WHERE id = ANY(%s)"),
+                (list(chunk_ids),),
+            )
 
     def replace_document_chunks(
         self, entries: Sequence[tuple[str, Sequence[TextChunk]]], *,
@@ -121,14 +129,16 @@ class PostgresTextChunkStore(BM25SearchStore):
                     on_progress("Writing to database", idx + 1, total)
                 if chunks:
                     cursor.execute(
-                        "DELETE FROM rag_text_chunks "
-                        "WHERE document_id = %s AND NOT (id = ANY(%s))",
+                        self._query("DELETE FROM {table} ")
+                        + self._query(
+                            "WHERE document_id = %s AND NOT (id = ANY(%s))",
+                        ),
                         (document_id, [chunk.id for chunk in chunks]),
                     )
                     self._upsert_chunks(cursor, chunks)
                 else:
                     cursor.execute(
-                        "DELETE FROM rag_text_chunks WHERE document_id = %s",
+                        self._query("DELETE FROM {table} WHERE document_id = %s"),
                         (document_id,),
                     )
 
@@ -138,27 +148,28 @@ class PostgresTextChunkStore(BM25SearchStore):
             return
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "DELETE FROM rag_text_chunks WHERE document_id = ANY(%s)",
+                self._query("DELETE FROM {table} WHERE document_id = ANY(%s)"),
                 (list(document_ids),),
             )
 
-    @staticmethod
-    def _upsert_chunks(cursor: object, chunks: Sequence[TextChunk]) -> None:
+    def _upsert_chunks(self, cursor: object, chunks: Sequence[TextChunk]) -> None:
         """Execute the shared chunk upsert statement using an open cursor."""
-        query = """
-            INSERT INTO rag_text_chunks (
-                id, document_id, content, chunk_index, source, start_offset,
-                end_offset, metadata
-            ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb)
-            ON CONFLICT (id) DO UPDATE SET
-                document_id = EXCLUDED.document_id,
-                content = EXCLUDED.content,
-                chunk_index = EXCLUDED.chunk_index,
-                source = EXCLUDED.source,
-                start_offset = EXCLUDED.start_offset,
-                end_offset = EXCLUDED.end_offset,
-                metadata = EXCLUDED.metadata
-        """
+        query = self._query(
+            """
+                INSERT INTO {table} (
+                    id, document_id, content, chunk_index, source, start_offset,
+                    end_offset, metadata
+                ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb)
+                ON CONFLICT (id) DO UPDATE SET
+                    document_id = EXCLUDED.document_id,
+                    content = EXCLUDED.content,
+                    chunk_index = EXCLUDED.chunk_index,
+                    source = EXCLUDED.source,
+                    start_offset = EXCLUDED.start_offset,
+                    end_offset = EXCLUDED.end_offset,
+                    metadata = EXCLUDED.metadata
+            """
+        )
         values = [
             (
                 chunk.id,
@@ -186,36 +197,47 @@ class PostgresTextChunkStore(BM25SearchStore):
             ) from error
         return psycopg.connect(self._dsn)
 
+    def _query(self, template: LiteralString):
+        """Safely interpolate the configured table identifier into SQL."""
+        try:
+            from psycopg import sql
+        except ImportError as error:
+            raise RuntimeError(
+                "PostgreSQL support requires psycopg. Install dependencies with "
+                "`pip install -r requirements.txt`."
+            ) from error
+        return sql.SQL(template).format(table=sql.Identifier(self._table_name))
+
     @staticmethod
     def _to_chunk(row: tuple[object, ...]) -> TextChunk:
-        source_data = PostgresTextChunkStore._json_object(row[4], field="source")
-        metadata = PostgresTextChunkStore._json_object(row[7], field="metadata")
+        source_data = PostgresBM25SearchStore._json_object(row[4], field="source")
+        metadata = PostgresBM25SearchStore._json_object(row[7], field="metadata")
         return TextChunk(
             id=str(row[0]),
             document_id=str(row[1]),
             content=str(row[2]),
-            index=PostgresTextChunkStore._required_int(row[3], field="chunk_index"),
+            index=PostgresBM25SearchStore._required_int(row[3], field="chunk_index"),
             source=SourceRef(
-                document_id=PostgresTextChunkStore._optional_string(
+                document_id=PostgresBM25SearchStore._optional_string(
                     source_data.get("document_id"), field="source.document_id"
                 ),
-                uri=PostgresTextChunkStore._optional_string(
+                uri=PostgresBM25SearchStore._optional_string(
                     source_data.get("uri"), field="source.uri"
                 ),
-                title=PostgresTextChunkStore._optional_string(
+                title=PostgresBM25SearchStore._optional_string(
                     source_data.get("title"), field="source.title"
                 ),
-                locator=PostgresTextChunkStore._optional_string(
+                locator=PostgresBM25SearchStore._optional_string(
                     source_data.get("locator"), field="source.locator"
                 ),
             ),
             start_offset=(
-                PostgresTextChunkStore._required_int(row[5], field="start_offset")
+                PostgresBM25SearchStore._required_int(row[5], field="start_offset")
                 if row[5] is not None
                 else None
             ),
             end_offset=(
-                PostgresTextChunkStore._required_int(row[6], field="end_offset")
+                PostgresBM25SearchStore._required_int(row[6], field="end_offset")
                 if row[6] is not None
                 else None
             ),

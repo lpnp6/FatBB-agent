@@ -25,7 +25,9 @@ class TextChunkStore(ABC):
 
     @abstractmethod
     def replace_document_chunks(
-        self, entries: Sequence[tuple[str, Sequence[TextChunk]]], *,
+        self,
+        entries: Sequence[tuple[str, Sequence[TextChunk]]],
+        *,
         on_progress: Callable[[str, int, int], None] | None = None,
     ) -> None:
         """Atomically replace chunks for one or more documents in one connection."""
@@ -47,3 +49,27 @@ class BM25SearchStore(TextChunkStore):
         filters: Mapping[str, object],
     ) -> list[ScoredTextChunk]:
         """Return backend-scored, descending BM25 matches."""
+
+
+class VectorSearchStore(TextChunkStore):
+    """A store capable of executing vector search in its native backend."""
+
+    @abstractmethod
+    def search(
+        self,
+        query_text: str,
+        *,
+        top_k: int,
+        filters: Mapping[str, object],
+    ) -> list[ScoredTextChunk]:
+        """Return backend-scored, descending vector matches."""
+
+    @abstractmethod
+    async def asearch(
+        self,
+        query_text: str,
+        *,
+        top_k: int,
+        filters: Mapping[str, object],
+    ) -> list[ScoredTextChunk]:
+        """Asynchronosly perform a vector similarity seatch."""

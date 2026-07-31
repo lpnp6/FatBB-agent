@@ -1,5 +1,12 @@
 """Storage adapter implementations."""
 
-from .postgres_text_chunk_store import PostgresTextChunkStore
+from .postgres.postgres_bm25_search_store import PostgresBM25SearchStore
+from .postgres.postgres_vector_search_store import PostgresVectorSearchStore
 
-__all__ = ["PostgresTextChunkStore"]
+PostgresTextChunkStore = PostgresBM25SearchStore
+
+__all__ = [
+    "PostgresBM25SearchStore",
+    "PostgresTextChunkStore",
+    "PostgresVectorSearchStore",
+]
