@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import math
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from urllib.error import URLError
@@ -90,15 +91,19 @@ class OllamaEmbeddingClient(EmbeddingClient):
         ordered: list[object] = [None] * len(sub_batches)
         completed = 0
         failed: list[int] = []
+
+        def _on_sub_batch(count: int) -> None:
+            nonlocal completed
+            completed += count
+            if on_progress is not None:
+                on_progress("Generating embeddings", completed, total)
+
         for idx, batch in enumerate(sub_batches):
             try:
-                ordered[idx] = self._batch_with_retry(batch)
-                completed += len(batch)
+                ordered[idx] = self._batch_with_retry(batch, on_progress=_on_sub_batch)
             except RuntimeError:
                 logger.exception("Sub-batch %d failed after all retries", idx)
                 failed.append(idx)
-            if on_progress is not None:
-                on_progress("Generating embeddings", completed, total)
         elapsed = time.monotonic() - t0
         if failed:
             raise RuntimeError(
@@ -135,6 +140,14 @@ class OllamaEmbeddingClient(EmbeddingClient):
         ordered: list[object] = [None] * len(sub_batches)
         pending: list[tuple[int, Sequence[str]]] = list(enumerate(sub_batches))
         completed = 0
+        completed_lock = threading.Lock()
+
+        def _on_sub_batch(count: int) -> None:
+            nonlocal completed
+            with completed_lock:
+                completed += count
+                if on_progress is not None:
+                    on_progress("Generating embeddings", completed, total)
 
         for attempt in range(_MAX_RETRIES):
             if not pending:
@@ -145,7 +158,7 @@ class OllamaEmbeddingClient(EmbeddingClient):
                     attempt + 1, _MAX_RETRIES, len(pending),
                 )
             tasks = [
-                asyncio.to_thread(self._batch_request, batch)
+                asyncio.to_thread(self._batch_request, batch, _on_sub_batch)
                 for _, batch in pending
             ]
             outcomes = await asyncio.gather(*tasks, return_exceptions=True)
@@ -159,10 +172,7 @@ class OllamaEmbeddingClient(EmbeddingClient):
                     still_pending.append((idx, sub_batches[idx]))
                 else:
                     ordered[idx] = outcome
-                    completed += len(outcome)
             pending = still_pending
-            if on_progress is not None:
-                on_progress("Generating embeddings", completed, total)
 
         if pending:
             failed = [str(idx) for idx, _ in pending]
@@ -177,12 +187,15 @@ class OllamaEmbeddingClient(EmbeddingClient):
         )
         return [vec for batch in ordered for vec in batch]  # type: ignore[misc]
 
-    def _batch_with_retry(self, texts: Sequence[str]) -> list[list[float]]:
+    def _batch_with_retry(
+        self, texts: Sequence[str],
+        on_progress: Callable[[int], None] | None = None,
+    ) -> list[list[float]]:
         """Send one batch, retrying on transient errors."""
         last: Exception | None = None
         for attempt in range(_MAX_RETRIES):
             try:
-                return self._batch_request(texts)
+                return self._batch_request(texts, on_progress=on_progress)
             except RuntimeError as exc:
                 last = exc
                 logger.warning(
@@ -193,7 +206,10 @@ class OllamaEmbeddingClient(EmbeddingClient):
             f"Sub-batch failed after {_MAX_RETRIES} retries: {last}"
         ) from last
 
-    def _batch_request(self, texts: Sequence[str]) -> list[list[float]]:
+    def _batch_request(
+        self, texts: Sequence[str],
+        on_progress: Callable[[int], None] | None = None,
+    ) -> list[list[float]]:
         """Send one batch request and return validated embedding vectors."""
         response = self._request(payload=json.dumps({"model": self._model, "input": list(texts)}))
         if not isinstance(response, Mapping):
@@ -214,6 +230,8 @@ class OllamaEmbeddingClient(EmbeddingClient):
             ):
                 raise RuntimeError("Ollama returned an invalid embedding vector in batch")
             result.append([float(value) for value in item])
+        if on_progress is not None:
+            on_progress(len(result))
         return result
 
     # ── request helpers ──────────────────────────────────────────────
