@@ -24,3 +24,4 @@ class UiState:
     status: str = "Type / to open the command palette."
     progress: str = ""
     lines: tuple[str, ...] = field(default_factory=tuple)
+    scroll_offset: int = 0

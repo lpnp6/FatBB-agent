@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
+
+# When running from source (not installed via pip), ensure the ``src/``
+# directory is on sys.path so that dynamic handler imports like
+# ``fatbb.cli.actions:select_knowledge_base`` resolve correctly.
+_src = Path(__file__).resolve().parents[2]
+if str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
@@ -131,6 +139,36 @@ def main() -> None:
             return
         event.app.exit()
 
+    @key_bindings.add("pageup")
+    def _pageup(event) -> None:
+        controller.on_scroll("page_up")
+        redraw()
+
+    @key_bindings.add("pagedown")
+    def _pagedown(event) -> None:
+        controller.on_scroll("page_down")
+        redraw()
+
+    @key_bindings.add("c-up")
+    def _ctrl_up(event) -> None:
+        controller.on_scroll("wheel_up")
+        redraw()
+
+    @key_bindings.add("c-down")
+    def _ctrl_down(event) -> None:
+        controller.on_scroll("wheel_down")
+        redraw()
+
+    @key_bindings.add("<scroll-up>")
+    def _wheel_up(event) -> None:
+        controller.on_scroll("wheel_up")
+        redraw()
+
+    @key_bindings.add("<scroll-down>")
+    def _wheel_down(event) -> None:
+        controller.on_scroll("wheel_down")
+        redraw()
+
     # The chat surface always remains mounted. The slash-command palette is a
     # floating overlay that covers the entire body, while the header and input
     # remain visible and the previous transcript stays preserved in state.
@@ -179,8 +217,10 @@ def main() -> None:
     )
     # ``full_screen`` permits a stable overlay layout; the controller remains
     # terminal-framework independent and can be reused by another UI later.
-    app = Application(layout=layout, key_bindings=key_bindings, full_screen=True, mouse_support=False)
+    app = Application(layout=layout, key_bindings=key_bindings, full_screen=True, mouse_support=True)
     controller._app = app
+    import shutil
+    controller.terminal_height = shutil.get_terminal_size().lines
     app.run()
 
 

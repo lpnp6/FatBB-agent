@@ -27,6 +27,7 @@ class CliController:
         self._config = config
         self.state = UiState(screen=config.home_page)
         self._app: object = None
+        self.terminal_height: int | None = None
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._indexing_lock = threading.Lock()
         self._existing: list[KnowledgeBase] = []
@@ -104,6 +105,23 @@ class CliController:
             home_page=self._config.home_page, palette_page=self._config.palette_page,
             item_count=len(self.items()),
         ))
+
+    def on_scroll(self, direction: str) -> None:
+        """Adjust the chat transcript scroll offset by a page-sized delta.
+
+        *direction* is ``"page_up"`` (scroll toward older content) or
+        ``"page_down"`` (scroll toward newer content).  The offset is
+        clamped so it never goes negative or beyond the last visible line.
+        """
+        if direction in ("wheel_up", "wheel_down"):
+            delta = -3 if direction == "wheel_down" else 3
+        else:
+            page_size = max(5, (self.terminal_height or 24) - 3)
+            delta = -page_size if direction == "page_down" else page_size
+        self.state = replace(
+            self.state,
+            scroll_offset=max(0, self.state.scroll_offset + delta),
+        )
 
     def is_home_page(self) -> bool:
         """Whether the active page is the configured chat/home page."""

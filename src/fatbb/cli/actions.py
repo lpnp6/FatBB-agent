@@ -226,6 +226,7 @@ def retrieve(controller: CliController, value: str | None) -> None:
     controller.state = replace(
         controller.state, input_text="", lines=lines,
         status=(f"Retrieved {len(evidence)} relevant sources." if evidence else "No relevant sources found."),
+        scroll_offset=0,
     )
 
 
@@ -236,6 +237,7 @@ def _activate(controller: CliController, knowledge_base: KnowledgeBase, status: 
         controller.state, screen=controller._config.home_page, input_text="", selected_index=0,
         active_knowledge_base_id=knowledge_base.id,
         active_knowledge_base_name=knowledge_base.name, status=status, lines=(),
+        scroll_offset=0,
     )
 
 

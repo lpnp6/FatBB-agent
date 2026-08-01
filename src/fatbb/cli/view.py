@@ -33,7 +33,21 @@ def body(controller: CliController) -> HTML:
         parts.append(hint)
     if controller.items() and not controller.is_palette_page():
         parts.extend(("", _menu_text(controller)))
-    return HTML("\n".join(_escape(part) for part in parts))
+
+    text = "\n".join(_escape(part) for part in parts)
+    all_lines = text.split("\n")
+
+    # Apply scroll offset so the user can page through long transcripts.
+    term_height = getattr(controller, "terminal_height", None) or 24
+    visible_height = max(5, term_height - 3)  # header (1) + prompt area (2)
+    max_scroll = max(0, len(all_lines) - visible_height)
+    offset = min(state.scroll_offset, max_scroll)
+    visible = all_lines[offset:]
+
+    if offset > 0:
+        visible.insert(0, "─── ↑ scrolled up · PageDown to return ↓ ───")
+
+    return HTML("\n".join(visible))
 
 
 def palette(controller: CliController) -> HTML:
