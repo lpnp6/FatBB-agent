@@ -312,7 +312,13 @@ def run_training(config: QLoRAConfig) -> None:
     training_args = TrainingArguments(
         output_dir=config.output_dir,
         per_device_train_batch_size=config.per_device_train_batch_size,
+        per_device_eval_batch_size=1,          # single sample per eval forward pass
         gradient_accumulation_steps=config.gradient_accumulation_steps,
+        eval_accumulation_steps=8,             # split eval across 8 micro-batches;
+                                                # each forward pass frees activations
+                                                # before the next one starts — critical
+                                                # because gradient checkpointing does
+                                                # NOT run during eval
         learning_rate=config.learning_rate,
         num_train_epochs=config.num_train_epochs,
         warmup_ratio=config.warmup_ratio,
@@ -332,9 +338,9 @@ def run_training(config: QLoRAConfig) -> None:
         fp16=not torch.cuda.is_bf16_supported(),
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
-        dataloader_num_workers=2,
-        dataloader_pin_memory=True,
-        report_to=[],                       # no wandb / tensorboard
+        dataloader_num_workers=0,              # avoid forked-process CUDA context copies
+        dataloader_pin_memory=False,           # no pinned-host memory; saves VRAM
+        report_to=[],                          # no wandb / tensorboard
         seed=config.seed,
         resume_from_checkpoint=resume_from,
     )
@@ -352,6 +358,7 @@ def run_training(config: QLoRAConfig) -> None:
 
     logger.info("Starting training — %d train / %d val examples",
                 len(tokenized_train), len(tokenized_val))
+    torch.cuda.empty_cache()                    # free any lingering allocs from model load
     trainer.train()
 
     # -- Save ---------------------------------------------------------------
