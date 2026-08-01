@@ -1,8 +1,8 @@
 # Embedding Concurrency Architecture
 
-> Version: v1.0
+> Version: v1.1
 > Date: 2026-08-01
-> Target: Document the task-queue / worker-pool concurrency model for Ollama batch embedding
+> Target: Concurrency model for Ollama batch embedding — architecture, tuning, and design rationale
 
 ---
 
@@ -56,7 +56,7 @@ resources and the Ollama server.
                      ▼                ▼
               ┌─────────────────────────────────┐
               │    ThreadPoolExecutor            │
-              │    (fixed _MAX_THREAD_WORKERS)   │
+              │    (sized to _MAX_CONCURRENT_REQUESTS)      │
               │                                 │
               │  _batch_request() in OS threads  │
               │  → urllib.urlopen() HTTP POST    │
@@ -102,10 +102,10 @@ resources and the Ollama server.
 Only semaphore and thread pool are bound; workers follow sub-batch count:
 
 ```python
-_MAX_CONCURRENT_REQUESTS = 5   # the only knob
+_MAX_CONCURRENT_REQUESTS = 4   # the only knob (matches Ollama's default)
 
 semaphore = asyncio.Semaphore(_MAX_CONCURRENT_REQUESTS)   # gates HTTP calls
-executor  = ThreadPoolExecutor(_MAX_CONCURRENT_REQUESTS)  # threads ≥ semaphore
+executor  = ThreadPoolExecutor(_MAX_CONCURRENT_REQUESTS)  # threads = semaphore
 n_workers = len(sub_batches)    # one coroutine per task (cheap!)
 ```
 
@@ -261,7 +261,7 @@ If Ollama is running on GPU (e.g. `nomic-embed-text` on CUDA):
   highly parallelised internally; concurrent requests cause VRAM contention.
 - Semaphore, workers, and thread pool all become 1 — no further tuning needed.
 
-### 7.2 Tuning for CPU-only
+### 7.3 Tuning for CPU-only
 
 If Ollama runs on CPU:
 - Set `_MAX_CONCURRENT_REQUESTS` to `os.cpu_count() // 2`.
@@ -269,7 +269,113 @@ If Ollama runs on CPU:
 
 ---
 
-## 8. Related files
+## 8. Design evolution — lessons learned
+
+This section records the iterative refinements that led to the current
+architecture.  Each iteration fixed a concrete problem; the final design
+is the accumulation of those corrections.
+
+### 8.1 Iteration 1 — code path
+
+```
+asyncio.to_thread(self._batch_request, batch)  # unbounded threads
+```
+
+**Problem**: ``asyncio.to_thread()`` uses the event loop's default executor,
+which has no bound on the number of threads.  For 100 concurrent sub-batches
+this could spawn 100 OS threads, starving the process of memory and degrading
+throughput through context-switch overhead.
+
+**Fix**: Replaced with a shared ``ThreadPoolExecutor`` of fixed size.
+
+### 8.2 Iteration 2 — round-based retry + manual lock
+
+```
+for attempt in range(_MAX_RETRIES):
+    tasks = [asyncio.to_thread(...) for batch in pending]
+    outcomes = await asyncio.gather(*tasks)
+    # all-or-nothing: one slow batch blocks retries for all others
+    completed += len(outcome)  # race: called from multiple threads
+```
+
+**Problems**:
+
+1. **Lock on ``completed``**: progress was updated by a callback fired from
+   arbitrary OS threads (via ``asyncio.to_thread``).  A ``threading.Lock``
+   protected the counter, but cross-primitive locking (thread lock used from
+   async code) is fragile — an ``await`` inside the lock would deadlock.
+2. **Round-based retry**: after ``asyncio.gather`` returned, ALL survivors
+   were re-dispatched in the next round.  A single slow batch held up
+   retries for every other failed batch.
+3. **Progress granularity**: ``on_progress`` only fired once per round, not
+   per sub-batch.
+
+**Fix**: Introduced task-queue + result-queue pattern with a single-consumer
+collector — no locks needed (see §4).
+
+### 8.3 Iteration 3 — two-parameter confusion
+
+```
+_MAX_CONCURRENT_REQUESTS = 5   # semaphore
+_MAX_THREAD_WORKERS = 4        # thread pool
+```
+
+**Problem**: Two knobs that must satisfy ``threads ≥ semaphore``.  When
+``threads=4 < semaphore=5``, a worker could acquire a semaphore slot but find
+no thread available — the slot is wasted, the semaphore provides no actual
+back-pressure.  Manually keeping the two in sync is unnecessary mental
+overhead.
+
+**Fix**: Removed ``_MAX_THREAD_WORKERS``.  A single parameter
+``_MAX_CONCURRENT_REQUESTS`` now sizes both semaphore and thread pool.
+
+### 8.4 Iteration 4 — artificially limited workers
+
+```
+n_workers = min(_MAX_CONCURRENT_REQUESTS, len(sub_batches))
+```
+
+**Problem**: Workers were capped at the semaphore size out of concern for
+retry re-entry — that if all workers drained the queue and exited, a retry
+would have no worker to pick it up.  But this reasoning was backwards: fewer
+workers means *fewer* chances for a retry to be picked up.  When a worker
+fails and re-queues, it loops back immediately and picks up the re-queued
+task itself — no extra workers needed.  With a cap of 5 workers for 50
+sub-batches, 45 tasks sit in the queue unassigned, waiting for a worker to
+finish before they're even claimed.
+
+**Fix**: ``n_workers = len(sub_batches)`` — one coroutine per task.
+Coroutines are ~1 KB each; 1,000 workers costs ~1 MB.  The semaphore is the
+only concurrency gate that matters.
+
+### 8.5 Iteration 5 — exceeding Ollama's server limit
+
+```
+_MAX_CONCURRENT_REQUESTS = 5   # Ollama default is 4
+```
+
+**Problem**: ``OLLAMA_NUM_PARALLEL`` defaults to 4.  Sending 5 concurrent
+requests means the 5th one queues inside Ollama, adding latency and
+undermining the client-side semaphore's purpose.  The client should match
+the server's limit so back-pressure is applied before requests leave the
+process.
+
+**Fix**: Set ``_MAX_CONCURRENT_REQUESTS = 4`` to match Ollama's default.
+If the server is tuned higher, the client should be updated to match.
+
+### 8.6 Summary of principles
+
+| # | Principle | Why |
+|---|-----------|-----|
+| 1 | **One knob is better than two** when they always move together. | Fewer mistakes, fewer configs to audit. |
+| 2 | **Let the semaphore gate everything.** Don't invent second sources of back-pressure. | Each extra limit interacts non-trivially with the others. |
+| 3 | **Don't artificially cap coroutine count.** They're cheap; over-capping creates under-subscription. | The bottleneck should be I/O, not an arbitrary worker count. |
+| 4 | **Match the server's concurrency model.** Client-side limits should align with server-side limits. | Otherwise back-pressure fires on the wrong side of the wire. |
+| 5 | **Queues decouple producers from consumers.** A result queue + single collector eliminates locks. | "Don't communicate by sharing memory; share memory by communicating." |
+
+---
+
+## 9. Related files
 
 | File | Role |
 |------|------|
