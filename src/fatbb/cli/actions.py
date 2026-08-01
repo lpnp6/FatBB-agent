@@ -250,8 +250,11 @@ def _format_evidence(item: object, index: int) -> str:
         return str(item)
     source = evidence.source.title if evidence.source and evidence.source.title else "Unknown source"
     content = " ".join(evidence.content.split())
-    preview = content[:300] + ("…" if len(content) > 300 else "")
-    return f"{index}. {source} · score {evidence.score:.2f}\n   {preview}"
+    return (
+        f"{index}. <ansiblue>{_escape_html(source)}</ansiblue> "
+        f"· score <ansigreen>{evidence.score:.2f}</ansigreen>\n"
+        f"   {_escape_html(content)}"
+    )
 
 
 def _show(controller: CliController, route: str, **changes: object) -> None:

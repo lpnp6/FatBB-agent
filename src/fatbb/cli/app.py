@@ -3,15 +3,7 @@
 from __future__ import annotations
 
 import logging
-import sys
 from pathlib import Path
-
-# When running from source (not installed via pip), ensure the ``src/``
-# directory is on sys.path so that dynamic handler imports like
-# ``fatbb.cli.actions:select_knowledge_base`` resolve correctly.
-_src = Path(__file__).resolve().parents[2]
-if str(_src) not in sys.path:
-    sys.path.insert(0, str(_src))
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer

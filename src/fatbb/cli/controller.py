@@ -6,6 +6,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from importlib import import_module
+import logging
 import threading
 from typing import cast
 
@@ -180,4 +181,7 @@ class CliController:
             else:
                 handler(self, value)
         except (ImportError, AttributeError, TypeError, ValueError) as error:
+            logging.getLogger(__name__).exception(
+                "Failed to invoke handler %r", handler_path,
+            )
             raise RuntimeError(f"Unable to invoke configured action handler: {handler_path}") from error
