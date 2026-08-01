@@ -25,6 +25,75 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# GPU memory diagnostics
+# ---------------------------------------------------------------------------
+
+def _gpu_snapshot(tag: str) -> None:
+    """Log current GPU memory state with a human-readable *tag*."""
+    import torch
+
+    if not torch.cuda.is_available():
+        logger.info("[mem] %s | CUDA unavailable", tag)
+        return
+
+    free_bytes, total_bytes = torch.cuda.mem_get_info(0)                      # ①
+    allocated = torch.cuda.memory_allocated(0)                                 # ②
+    reserved = torch.cuda.memory_reserved(0)                                   # ③
+    peak_alloc = torch.cuda.max_memory_allocated(0)                            # ④
+
+    def _gb(b: int) -> str:
+        return f"{b / (1024 ** 3):.2f} GB"
+
+    logger.info(
+        "[mem] %s | free=%s / total=%s | alloc=%s | reserved=%s | peak_alloc=%s",
+        tag,
+        _gb(free_bytes),
+        _gb(total_bytes),
+        _gb(allocated),
+        _gb(reserved),
+        _gb(peak_alloc),
+    )
+
+
+def _make_memory_watchdog(
+    max_train_snapshots: int = 3,
+    max_eval_snapshots: int = 3,
+):
+    """Return a ``TrainerCallback`` subclass instance that snapshots GPU memory
+    around training steps and eval cycles.
+
+    Only the first *max_train_snapshots* steps and *max_eval_snapshots*
+    evaluations are logged to avoid spam.  Inheriting from the HF base class
+    ensures all other callback methods (``on_init_end``, ``on_epoch_begin``,
+    etc.) have the default no-op implementation.
+    """
+    from transformers import TrainerCallback
+
+    class _Watchdog(TrainerCallback):
+        def __init__(self, max_train: int, max_eval: int):
+            self._train_count = 0
+            self._eval_count = 0
+            self._max_train = max_train
+            self._max_eval = max_eval
+
+        def on_step_begin(self, args, state, control, **kwargs):
+            if self._train_count < self._max_train:
+                _gpu_snapshot(f"step {state.global_step + 1}  BEGIN")
+
+        def on_step_end(self, args, state, control, **kwargs):
+            if self._train_count < self._max_train:
+                _gpu_snapshot(f"step {state.global_step + 1}  END")
+                self._train_count += 1
+
+        def on_evaluate(self, args, state, control, **kwargs):
+            if self._eval_count < self._max_eval:
+                _gpu_snapshot(f"eval  #{self._eval_count + 1}  (after)")
+                self._eval_count += 1
+
+    return _Watchdog(max_train_snapshots, max_eval_snapshots)
+
+
+# ---------------------------------------------------------------------------
 # Prompt formatting
 # ---------------------------------------------------------------------------
 
@@ -257,8 +326,7 @@ def run_training(config: QLoRAConfig) -> None:
             "No GPU detected — check that PyTorch was installed with CUDA support "
             "and your GPU drivers are working."
         )
-    logger.info("GPU: %s (%.1f GB free)", torch.cuda.get_device_name(0),
-                torch.cuda.mem_get_info()[0] / (1024 ** 3))
+    _gpu_snapshot("startup (before anything)")
 
     # -- Data ---------------------------------------------------------------
     train_file = Path(config.output_dir) / "train.jsonl"
@@ -276,10 +344,13 @@ def run_training(config: QLoRAConfig) -> None:
 
     train_examples = load_jsonl_dataset(str(train_file), system_prompt)
     val_examples = load_jsonl_dataset(str(val_file), system_prompt)
+    _gpu_snapshot("after dataset load (CPU)")
 
     # -- Model & tokenizer --------------------------------------------------
     model, tokenizer = load_model_and_tokenizer(config)
+    _gpu_snapshot("after 4-bit model load")
     model = apply_lora(model, config)
+    _gpu_snapshot("after LoRA apply")
 
     train_cache = (
         str(Path(config.output_dir) / "cache" / "train.tok")
@@ -295,6 +366,7 @@ def run_training(config: QLoRAConfig) -> None:
     tokenized_val = tokenize_dataset(
         val_examples, tokenizer, config.max_seq_length, cache_dir=val_cache,
     )
+    _gpu_snapshot("after tokenization (CPU)")
 
     # -- Collator -----------------------------------------------------------
     collator = _CompletionOnlyCollator(tokenizer)
@@ -353,12 +425,17 @@ def run_training(config: QLoRAConfig) -> None:
         eval_dataset=tokenized_val,
         data_collator=collator,
         processing_class=tokenizer,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=5)],
+        callbacks=[
+            EarlyStoppingCallback(early_stopping_patience=5),
+            _make_memory_watchdog(max_train_snapshots=3, max_eval_snapshots=3),
+        ],
     )
 
     logger.info("Starting training — %d train / %d val examples",
                 len(tokenized_train), len(tokenized_val))
+    _gpu_snapshot("before train() — pre empty_cache")
     torch.cuda.empty_cache()                    # free any lingering allocs from model load
+    _gpu_snapshot("before train() — post empty_cache")
     trainer.train()
 
     # -- Save ---------------------------------------------------------------
