@@ -15,9 +15,6 @@ def header(controller: CliController) -> HTML:
 
 def body(controller: CliController) -> HTML:
     state = controller.state
-    # Menus and creation pages are modal over the chat transcript. Keep prior
-    # retrieval results in state, but do not append a new menu beneath them.
-    # Returning to CHAT makes the unchanged transcript visible again.
     parts: list[str] = []
     if controller.is_progress_page():
         parts.extend(("Creating knowledge base", state.progress or "Starting…"))
@@ -25,8 +22,6 @@ def body(controller: CliController) -> HTML:
         parts.append(state.status)
         if state.progress:
             parts.append(f"  {state.progress}")
-        # Retrieval lines already contain embedded HTML colour tags — skip
-        # global escaping so the tags render correctly.
         if state.lines:
             parts.append("")
             parts.extend(state.lines)
@@ -37,21 +32,49 @@ def body(controller: CliController) -> HTML:
     if controller.items() and not controller.is_palette_page():
         parts.extend(("", _menu_text(controller)))
 
+    # Build raw text, escaping user content while preserving HTML colour tags
+    # that were embedded by ``_format_evidence``.
     text = "\n".join(
         part if _has_html_tags(part) else _escape(part)
         for part in parts
     )
-    all_lines = text.split("\n")
+    raw_lines = text.split("\n")
 
-    # Apply scroll offset so the user can page through long transcripts.
-    term_height = getattr(controller, "terminal_height", None) or 24
-    visible_height = max(5, term_height - 3)  # header (1) + prompt area (2)
-    max_scroll = max(0, len(all_lines) - visible_height)
+    # Because ``wrap_lines=False`` on the Window, we must wrap long lines
+    # ourselves.  This also lets us compute the *visual* line count so that
+    # ``max_scroll`` reflects what the user actually sees on screen.
+    import shutil
+    import textwrap
+    term_size = shutil.get_terminal_size()
+    width = max(40, term_size.columns - 1)  # one-column safety margin
+    visible_height = max(1, term_size.lines - 3)  # header + prompt area
+
+    wrapped: list[str] = []
+    for line in raw_lines:
+        # Strip prompt-toolkit HTML tags to measure true displayed length.
+        # A line with tags is always wrapped as a single logical line (the
+        # tags don't produce visible width), so we wrap by character count
+        # on the plain-text form then re-apply the original markup on the
+        # first wrapped segment.
+        plain = _strip_html(line)
+        if len(plain) <= width:
+            wrapped.append(line)
+        else:
+            # Wrap the plain text, then insert the original (tagged) line
+            # as the first segment and append continuation lines.
+            plain_wrapped = textwrap.wrap(plain, width=width)
+            if _has_html_tags(line):
+                wrapped.append(line)
+                wrapped.extend(plain_wrapped[1:])
+            else:
+                wrapped.extend(plain_wrapped)
+
+    max_scroll = max(0, len(wrapped) - visible_height)
     offset = min(state.scroll_offset, max_scroll)
-    visible = all_lines[offset:]
+    visible = wrapped[offset:]
 
     if offset > 0:
-        visible.insert(0, "─── ↑ scrolled up · PageDown to return ↓ ───")
+        visible.insert(0, "--- scrolled up (PageDown to return) ---")
 
     return HTML("\n".join(visible))
 
@@ -79,3 +102,13 @@ def _escape(value: str) -> str:
 def _has_html_tags(value: str) -> bool:
     """Return ``True`` when *value* embeds prompt-toolkit HTML colour tags."""
     return "<ansi" in value
+
+
+def _strip_html(value: str) -> str:
+    """Remove prompt-toolkit HTML tags, leaving only visible text.
+
+    >>> _strip_html("<ansiblue>Hello</ansiblue> World")
+    'Hello World'
+    """
+    import re
+    return re.sub(r"</?[a-zA-Z][^>]*>", "", value)

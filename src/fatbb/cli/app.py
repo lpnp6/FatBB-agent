@@ -167,7 +167,7 @@ def main() -> None:
     chat = HSplit(
         [
             Window(FormattedTextControl(lambda: header(controller)), height=1),
-            Window(FormattedTextControl(lambda: body(controller)), wrap_lines=True),
+            Window(FormattedTextControl(lambda: body(controller)), wrap_lines=False),
             ConditionalContainer(
                 HSplit([
                     Window(height=1, char="─"),
@@ -211,8 +211,6 @@ def main() -> None:
     # terminal-framework independent and can be reused by another UI later.
     app = Application(layout=layout, key_bindings=key_bindings, full_screen=True, mouse_support=True)
     controller._app = app
-    import shutil
-    controller.terminal_height = shutil.get_terminal_size().lines
     app.run()
 
 

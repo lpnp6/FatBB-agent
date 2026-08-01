@@ -28,7 +28,6 @@ class CliController:
         self._config = config
         self.state = UiState(screen=config.home_page)
         self._app: object = None
-        self.terminal_height: int | None = None
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._indexing_lock = threading.Lock()
         self._existing: list[KnowledgeBase] = []
@@ -107,18 +106,25 @@ class CliController:
             item_count=len(self.items()),
         ))
 
-    def on_scroll(self, direction: str) -> None:
-        """Adjust the chat transcript scroll offset by a page-sized delta.
+    def _term_height(self) -> int:
+        """Terminal rows, read fresh each call so resize is detected."""
+        import shutil
+        return shutil.get_terminal_size().lines
 
-        *direction* is ``"page_up"`` (scroll toward older content) or
-        ``"page_down"`` (scroll toward newer content).  The offset is
-        clamped so it never goes negative or beyond the last visible line.
+    def on_scroll(self, direction: str) -> None:
+        """Adjust the chat transcript scroll offset.
+
+        ``"page_down"`` / ``"wheel_down"`` — scroll *down* (toward the end
+        of the transcript, increasing the offset so later lines are shown).
+
+        ``"page_up"`` / ``"wheel_up"`` — scroll *up* (toward the beginning,
+        decreasing the offset).
         """
         if direction in ("wheel_up", "wheel_down"):
-            delta = -3 if direction == "wheel_down" else 3
+            delta = 3 if direction == "wheel_down" else -3
         else:
-            page_size = max(5, (self.terminal_height or 24) - 3)
-            delta = -page_size if direction == "page_down" else page_size
+            page_size = max(5, self._term_height() - 3)
+            delta = page_size if direction == "page_down" else -page_size
         self.state = replace(
             self.state,
             scroll_offset=max(0, self.state.scroll_offset + delta),
