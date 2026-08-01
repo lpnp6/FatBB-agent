@@ -24,3 +24,6 @@ src/labeling/dedup/dedup_store.db-wal
 # OS
 Thumbs.db
 .DS_Store
+
+#Model
+models/

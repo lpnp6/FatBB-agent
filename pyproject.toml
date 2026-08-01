@@ -14,6 +14,16 @@ dependencies = [
     "tqdm>=4.66,<5",
 ]
 
+[project.optional-dependencies]
+finetune = [
+    "torch>=2.4",
+    "transformers>=4.45",
+    "peft>=0.12",
+    "bitsandbytes>=0.43",
+    "datasets>=2.20",
+    "accelerate>=0.33",
+]
+
 [project.scripts]
 fatbb = "fatbb.cli.app:main"
 
@@ -26,3 +36,4 @@ where = ["src"]
 [tool.setuptools.package-data]
 fatbb = ["config/*.toml"]
 labeling = ["prompts/*.txt"]
+labeling_sft = ["system.txt"]
