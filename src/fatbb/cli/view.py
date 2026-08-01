@@ -25,8 +25,11 @@ def body(controller: CliController) -> HTML:
         parts.append(state.status)
         if state.progress:
             parts.append(f"  {state.progress}")
+        # Retrieval lines already contain embedded HTML colour tags — skip
+        # global escaping so the tags render correctly.
         if state.lines:
-            parts.extend(("", *state.lines))
+            parts.append("")
+            parts.extend(state.lines)
     elif state.status.startswith("Error:"):
         parts.append(state.status)
     if hint := controller.page_hint():
@@ -34,7 +37,10 @@ def body(controller: CliController) -> HTML:
     if controller.items() and not controller.is_palette_page():
         parts.extend(("", _menu_text(controller)))
 
-    text = "\n".join(_escape(part) for part in parts)
+    text = "\n".join(
+        part if _has_html_tags(part) else _escape(part)
+        for part in parts
+    )
     all_lines = text.split("\n")
 
     # Apply scroll offset so the user can page through long transcripts.
@@ -68,3 +74,8 @@ def _menu_text(controller: CliController) -> str:
 
 def _escape(value: str) -> str:
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _has_html_tags(value: str) -> bool:
+    """Return ``True`` when *value* embeds prompt-toolkit HTML colour tags."""
+    return "<ansi" in value

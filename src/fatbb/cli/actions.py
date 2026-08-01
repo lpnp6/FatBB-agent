@@ -242,7 +242,11 @@ def _activate(controller: CliController, knowledge_base: KnowledgeBase, status: 
 
 
 def _format_evidence(item: object, index: int) -> str:
-    """Convert an evidence object into a compact, readable CLI result entry."""
+    """Convert an evidence object into a compact, readable CLI result entry.
+
+    Source text and content are escaped so embedded ``<`` / ``>`` characters
+    do not interfere with the ``prompt_toolkit`` HTML colour tags.
+    """
     from rag.models.evidence import Evidence
 
     evidence = item if isinstance(item, Evidence) else None
@@ -251,10 +255,15 @@ def _format_evidence(item: object, index: int) -> str:
     source = evidence.source.title if evidence.source and evidence.source.title else "Unknown source"
     content = " ".join(evidence.content.split())
     return (
-        f"{index}. <ansiblue>{_escape_html(source)}</ansiblue> "
+        f"{index}. <ansiblue>{_html(source)}</ansiblue> "
         f"· score <ansigreen>{evidence.score:.2f}</ansigreen>\n"
-        f"   {_escape_html(content)}"
+        f"   {_html(content)}"
     )
+
+
+def _html(value: str) -> str:
+    """Escape special characters so *value* is safe inside an HTML tag body."""
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _show(controller: CliController, route: str, **changes: object) -> None:
