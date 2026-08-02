@@ -2,6 +2,7 @@
 
 > **Status**: Implemented. All code under `src/labeling_sft/`.
 > **Target hardware**: RTX 4060 8 GB (or any GPU with ≥8 GB VRAM).
+> **Companion document**: [finetune-experience.md](finetune-experience.md) — complete technical reference covering the full training → GGUF → Ollama pipeline, memory management deep-dive, and troubleshooting.
 
 ## Frameworks
 
