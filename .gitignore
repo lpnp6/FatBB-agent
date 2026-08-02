@@ -31,3 +31,5 @@ models/
 # llama.cpp conversion tools (downloaded for GGUF export)
 llama_cpp_convert/
 convert_hf_to_gguf.py
+
+test_label.py

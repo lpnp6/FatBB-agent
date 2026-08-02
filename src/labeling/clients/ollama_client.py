@@ -14,6 +14,21 @@ from ..models.common import ExtractionResult, TokenUsage
 logger = logging.getLogger(__name__)
 
 
+def _val(obj: Any, field: str, default: Any = None) -> Any:
+    """Read *field* from *obj*, supporting both attribute and dict access.
+
+    The Ollama Python library returns Pydantic ``ChatResponse`` models in
+    normal use, but tests may inject plain dicts — this helper handles both.
+    """
+    if obj is None:
+        return default
+    if hasattr(obj, field):
+        return getattr(obj, field, default)
+    if isinstance(obj, dict):
+        return obj.get(field, default)
+    return default
+
+
 class OllamaLabelingClient(LabelingClient):
     """Extract recipe data through a local Ollama server.
 
@@ -21,28 +36,8 @@ class OllamaLabelingClient(LabelingClient):
     standard local address; set ``OLLAMA_HOST`` or pass *host* explicitly to
     point at a remote instance.
 
-    Injection points (``client``, ``http_client``) exist so tests can swap in
-    a fake without touching the real server.
-
-    Parameters
-    ----------
-    model:
-        Ollama model name, e.g. ``"fatbb-labeler:latest"``.
-    label_prompt_builder:
-        Prompt builder that wraps recipe markdown in the model's expected
-        chat template.
-    repair_prompt_builder:
-        Prompt builder for repair / validation-fix requests.
-    host:
-        Ollama server URL.  Defaults to ``http://127.0.0.1:11434``.
-    max_concurrent:
-        Limit concurrent requests via an internal semaphore.
-    num_predict:
-        Maximum tokens to generate per response.
-    temperature:
-        Sampling temperature forwarded in the Ollama ``options`` block.
-    empty_response_retries:
-        Retry count when Ollama returns an empty ``content`` string.
+    Injection points (``client``) allow tests to swap in a fake without
+    touching the real server.
     """
 
     def __init__(
@@ -53,6 +48,7 @@ class OllamaLabelingClient(LabelingClient):
         repair_prompt_builder: PromptBuilder,
         host: str = "http://127.0.0.1:11434",
         max_concurrent: int = 1,
+        num_ctx: int = 32768,
         num_predict: int = 16384,
         temperature: float = 0.1,
         empty_response_retries: int = 3,
@@ -62,6 +58,8 @@ class OllamaLabelingClient(LabelingClient):
             raise ValueError("model must not be empty")
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be at least 1")
+        if num_ctx < 1:
+            raise ValueError("num_ctx must be at least 1")
         if num_predict < 1:
             raise ValueError("num_predict must be at least 1")
         if empty_response_retries < 0:
@@ -72,15 +70,12 @@ class OllamaLabelingClient(LabelingClient):
         self._model = model
         self._label_builder = label_prompt_builder
         self._repair_builder = repair_prompt_builder
+        self._num_ctx = num_ctx
         self._num_predict = num_predict
         self._temperature = temperature
         self._empty_response_retries = empty_response_retries
         self._semaphore = asyncio.Semaphore(max_concurrent)
-
-        if client is not None:
-            self._client = client
-        else:
-            self._client = self._create_client(host)
+        self._client = client if client is not None else self._create_client(host)
 
     # ------------------------------------------------------------------
     # Factory
@@ -88,7 +83,6 @@ class OllamaLabelingClient(LabelingClient):
 
     @staticmethod
     def _create_client(host: str) -> Any:
-        """Create an ``ollama.AsyncClient`` pointed at *host*."""
         try:
             import ollama  # noqa: F401 — validate package presence
         except ImportError as error:
@@ -117,8 +111,7 @@ class OllamaLabelingClient(LabelingClient):
         async with self._semaphore:
             logger.info(
                 "Dispatching labeling request model=%s input_chars=%d",
-                self._model,
-                len(markdown),
+                self._model, len(markdown),
             )
             started_at = perf_counter()
             last_empty_error: Exception | None = None
@@ -130,6 +123,7 @@ class OllamaLabelingClient(LabelingClient):
                         messages=messages,
                         stream=False,
                         options={
+                            "num_ctx": self._num_ctx,
                             "num_predict": self._num_predict,
                             "temperature": self._temperature,
                         },
@@ -138,23 +132,17 @@ class OllamaLabelingClient(LabelingClient):
                     logger.exception("Labeling request failed model=%s", self._model)
                     raise
 
-                raw_output: str | None = (
-                    response.get("message", {}).get("content", None)
-                    if isinstance(response, dict) else None
-                )
-                if raw_output and raw_output.strip():
+                raw_output = _val(_val(response, "message"), "content")
+                if isinstance(raw_output, str) and raw_output.strip():
                     break
 
                 logger.warning(
                     "Labeling response was empty model=%s attempt=%d/%d",
-                    self._model,
-                    attempt + 1,
-                    self._empty_response_retries + 1,
+                    self._model, attempt + 1, self._empty_response_retries + 1,
                 )
                 last_empty_error = RuntimeError("Ollama returned an empty completion")
                 if attempt < self._empty_response_retries:
                     await asyncio.sleep(2 ** attempt)
-
             else:
                 logger.error(
                     "Labeling response was empty after all retries model=%s",
@@ -165,27 +153,25 @@ class OllamaLabelingClient(LabelingClient):
         latency_ms = int((perf_counter() - started_at) * 1000)
 
         token_usage = TokenUsage(
-            input=int(response.get("prompt_eval_count", 0) or 0),      # type: ignore[union-attr]
-            output=int(response.get("eval_count", 0) or 0),            # type: ignore[union-attr]
+            input=int(_val(response, "prompt_eval_count", 0) or 0),
+            output=int(_val(response, "eval_count", 0) or 0),
         )
         result = ExtractionResult(
-            raw_output=raw_output,                                      # type: ignore[arg-type]
+            raw_output=raw_output,  # type: ignore[arg-type]
             model=self.model_name,
             token_usage=token_usage,
             latency_ms=latency_ms,
             metadata={
-                "done_reason": str(response.get("done_reason", "") or ""),  # type: ignore[union-attr]
-                "total_duration_ns": int(response.get("total_duration", 0) or 0),  # type: ignore[union-attr]
-                "load_duration_ns": int(response.get("load_duration", 0) or 0),    # type: ignore[union-attr]
+                "done_reason": str(_val(response, "done_reason", "") or ""),
+                "total_duration_ns": int(_val(response, "total_duration", 0) or 0),
+                "load_duration_ns": int(_val(response, "load_duration", 0) or 0),
             },
         )
         logger.info(
             "Labeling request completed model=%s latency_ms=%d input_tokens=%d "
             "output_tokens=%d done_reason=%s",
-            result.model,
-            result.latency_ms,
-            result.token_usage.input,
-            result.token_usage.output,
+            result.model, result.latency_ms,
+            result.token_usage.input, result.token_usage.output,
             result.metadata["done_reason"],
         )
         return result
@@ -201,10 +187,10 @@ class OllamaLabelingClient(LabelingClient):
         async with self._semaphore:
             logger.info(
                 "Dispatching repair request model=%s error=%s",
-                self._model,
-                error_message[:120],
+                self._model, error_message[:120],
             )
             started_at = perf_counter()
+            last_empty_error: Exception | None = None
 
             for attempt in range(self._empty_response_retries + 1):
                 try:
@@ -213,6 +199,7 @@ class OllamaLabelingClient(LabelingClient):
                         messages=messages,
                         stream=False,
                         options={
+                            "num_ctx": self._num_ctx,
                             "num_predict": self._num_predict,
                             "temperature": self._temperature,
                         },
@@ -221,45 +208,39 @@ class OllamaLabelingClient(LabelingClient):
                     logger.exception("Repair request failed model=%s", self._model)
                     raise
 
-                raw_output_repaired: str | None = (
-                    response.get("message", {}).get("content", None)
-                    if isinstance(response, dict) else None
-                )
-                if raw_output_repaired and raw_output_repaired.strip():
+                repaired = _val(_val(response, "message"), "content")
+                if isinstance(repaired, str) and repaired.strip():
                     break
 
                 logger.warning(
                     "Repair response was empty model=%s attempt=%d/%d",
-                    self._model,
-                    attempt + 1,
-                    self._empty_response_retries + 1,
+                    self._model, attempt + 1, self._empty_response_retries + 1,
                 )
+                last_empty_error = RuntimeError("Ollama returned an empty completion")
                 if attempt < self._empty_response_retries:
                     await asyncio.sleep(2 ** attempt)
             else:
-                raise RuntimeError("Ollama returned an empty completion")
+                raise last_empty_error  # type: ignore[arg-type]
 
         latency_ms = int((perf_counter() - started_at) * 1000)
 
         token_usage = TokenUsage(
-            input=int(response.get("prompt_eval_count", 0) or 0),      # type: ignore[union-attr]
-            output=int(response.get("eval_count", 0) or 0),            # type: ignore[union-attr]
+            input=int(_val(response, "prompt_eval_count", 0) or 0),
+            output=int(_val(response, "eval_count", 0) or 0),
         )
         result = ExtractionResult(
-            raw_output=raw_output_repaired,                             # type: ignore[arg-type]
+            raw_output=repaired,  # type: ignore[arg-type]
             model=self.model_name,
             token_usage=token_usage,
             latency_ms=latency_ms,
             metadata={
-                "done_reason": str(response.get("done_reason", "") or ""),  # type: ignore[union-attr]
+                "done_reason": str(_val(response, "done_reason", "") or ""),
                 "repair": True,
             },
         )
         logger.info(
             "Repair request completed model=%s latency_ms=%d input_tokens=%d output_tokens=%d",
-            result.model,
-            result.latency_ms,
-            result.token_usage.input,
-            result.token_usage.output,
+            result.model, result.latency_ms,
+            result.token_usage.input, result.token_usage.output,
         )
         return result
