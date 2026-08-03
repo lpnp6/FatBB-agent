@@ -110,6 +110,7 @@ class DedupStore(ABC):
         recipe_card_hash: str,
         status: HashStatus,
         *,
+        source_id: str | None = None,
         raw_text: str | None = None,
         model: str | None = None,
         output: str | None = None,
@@ -122,6 +123,9 @@ class DedupStore(ABC):
         Args:
             recipe_card_hash: Content fingerprint of the recipe card.
             status: Initial lifecycle state (almost always IN_FLIGHT).
+            source_id: Stable unique identifier for the source document,
+                produced by a URIResolver. Links the dedup entry back to
+                its originating file/URI.
             raw_text: The raw recipe markdown.
             model: Model identifier that produced the labeling output.
             output: The labeling result JSON (only for ACCEPTED records).
@@ -132,6 +136,7 @@ class DedupStore(ABC):
     def update_status(
         self, recipe_card_hash: str, status: HashStatus,
         *,
+        source_id: str | None = None,
         raw_text: str | None = None,
         model: str | None = None,
         output: str | None = None,
@@ -145,6 +150,7 @@ class DedupStore(ABC):
         Args:
             recipe_card_hash: Content fingerprint to transition.
             status: Target lifecycle state.
+            source_id: If provided, store/update the source document identifier.
             raw_text: If provided, store/update the raw markdown.
             model: Model identifier, stored for provenance.
             output: Labeling result JSON, stored for training data.
