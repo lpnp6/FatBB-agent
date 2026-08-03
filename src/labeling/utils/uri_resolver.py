@@ -8,6 +8,7 @@ text for downstream processing (dedup, labeling).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from hashlib import blake2b
 from pathlib import Path
 
@@ -48,6 +49,26 @@ class FileSystemURIResolver(URIResolver):
     def resolve(self, uri: str) -> str:
         path = self._resolve_path(uri)
         return path.read_text(encoding="utf-8", errors="replace")
+
+    # ---- discovery ------------------------------------------------------------
+
+    def iter_files(
+        self, root: Path | str, *, glob: str = "**/*",
+    ) -> Iterator[tuple[str, str]]:
+        """Walk *root* and yield ``(uri, source_id)`` for every matching file.
+
+        Args:
+            root: Directory to walk.
+            glob: Pattern passed to :meth:`Path.glob`.  Default ``**/*``
+                matches every file recursively.
+
+        Yields:
+            Tuples of ``(absolute_path_uri, source_id)``.
+        """
+        for path in Path(root).glob(glob):
+            if path.is_file():
+                uri = str(path.resolve())
+                yield uri, self.source_id(uri)
 
     # ---- internal ------------------------------------------------------------
 
