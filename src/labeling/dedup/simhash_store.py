@@ -27,11 +27,12 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections import defaultdict
 from hashlib import blake2b
 from pathlib import Path
 
 from ..interfaces.checkpoint_store import CheckpointStore
-from ..interfaces.dedup_store import DedupStore, HashStatus
+from ..interfaces.dedup_store import DedupEntry, DedupStore, HashStatus
 
 # Number of blocks = threshold + 1  (pigeonhole guarantee)
 # Block width = 64 // (threshold + 1)
@@ -101,6 +102,11 @@ class SimHashDedupStore(DedupStore):
             raise RuntimeError("SimHashDedupStore was not constructed with a CheckpointStore")
         return self._checkpoint
 
+    # ---- factory --------------------------------------------------------
+
+    def create_in_memory(self) -> SimHashDedupStore:
+        return SimHashDedupStore(Path(":memory:"), threshold=self._threshold)
+
     # ---- fingerprint computation ---------------------------------------
 
     def recipe_card_hash(self, markdown: str) -> str:
@@ -124,6 +130,7 @@ class SimHashDedupStore(DedupStore):
     def lookup(self, recipe_card_hash: str) -> HashStatus | None:
         """Block-indexed candidate search + Hamming distance check."""
         blocks = self._hash_blocks(recipe_card_hash)
+        query_int = int(recipe_card_hash, 16)
 
         candidates: set[str] = set()
         for block_id, block_value in enumerate(blocks):
@@ -144,8 +151,9 @@ class SimHashDedupStore(DedupStore):
             tuple(candidates),
         ).fetchall()
 
+        threshold = self._threshold
         for stored_hash, status in rows:
-            if self._hamming(recipe_card_hash, stored_hash) <= self._threshold:
+            if (query_int ^ int(stored_hash, 16)).bit_count() <= threshold:
                 return HashStatus(status)
 
         return None
@@ -240,6 +248,126 @@ class SimHashDedupStore(DedupStore):
         self._db.commit()
         return len(stale)
 
+
+    # ---- batch operations -----------------------------------------------
+
+    def lookup_batch(self, hashes: list[str]) -> dict[str, HashStatus | None]:
+        """Batch lookup — return the current :class:`HashStatus` for every hash.
+
+        Complexity (n = len(hashes), m = unique candidate hashes in block buckets):
+
+        .. code-block:: text
+
+            Phase                Naive                          Optimised
+            ───────────────────────────────────────────────────────────────────
+            1. block-index       4n  queries  (O(n))           ≤4 queries        (O(1))
+            2. status fetch      1   query    (O(m))           1  query          (O(m))
+            3. Hamming check     n×m cmp     (O(n·m))         ~6n cmp (typical) (O(n·m) worst, ≪n·m typical)
+            int conversions      2·n·m        int(hex,16)      n + m            (once per hash)
+
+        Optimisations:
+
+        1. **Batched block-index queries** — collect all *block_value* values per
+           *block_id* and issue one ``WHERE block_id=? AND block_value IN (...)``
+           per block instead of 4n individual point queries.
+
+        2. **Candidate→input reverse index** — build a ``(block_id, block_value)
+           → set(input_indices)`` map so each candidate is only Hamming-checked
+           against the input hashes that actually share a block with it, not
+           against every input hash.  With the Manku index each candidate shares
+           a bucket with only a handful of inputs on average.
+
+        3. **Pre-computed int hashes** — every hex hash (input and candidate) is
+           parsed to ``int`` once upfront, so the inner Hamming loop does a
+           single ``(a ^ b).bit_count()`` with zero string→int conversions.
+        """
+        result: dict[str, HashStatus | None] = {}
+        if not hashes:
+            return result
+        result = {h: None for h in hashes}
+
+        # Pre-compute block decompositions, int hashes, and build a reverse
+        # index from (block_id, block_value) → set of input indices.
+        hash_ints: dict[str, int] = {}
+        bv_to_inputs: dict[tuple[int, int], set[int]] = defaultdict(set)
+        block_values_by_id: dict[int, set[int]] = {
+            bid: set() for bid in range(_BLOCKS)
+        }
+
+        for i, h in enumerate(hashes):
+            blocks = self._hash_blocks(h)
+            hash_ints[h] = int(h, 16)
+            for bid, bv in enumerate(blocks):
+                bv_to_inputs[(bid, bv)].add(i)
+                block_values_by_id[bid].add(bv)
+
+        # Phase 1 — batch block-index lookup (max _BLOCKS queries).
+        # Each query returns (candidate_hash, block_value) so we can
+        # reconstruct which input hashes the candidate is relevant to.
+        candidate_to_inputs: dict[str, set[int]] = defaultdict(set)
+        for bid, bvalues in block_values_by_id.items():
+            if not bvalues:
+                continue
+            placeholders = ",".join("?" * len(bvalues))
+            rows = self._db.execute(
+                "SELECT hash, block_value FROM simhash_index "
+                "WHERE block_id = ? AND block_value IN (" + placeholders + ")",
+                [bid] + list(bvalues),
+            ).fetchall()
+            for candidate_hash, bv in rows:
+                candidate_to_inputs[candidate_hash].update(
+                    bv_to_inputs.get((bid, bv), ())
+                )
+
+        if not candidate_to_inputs:
+            return result
+
+        # Phase 2 — fetch statuses for all unique candidates (1 query).
+        all_candidates = list(candidate_to_inputs.keys())
+        placeholders = ",".join("?" * len(all_candidates))
+        rows = self._db.execute(
+            "SELECT hash, status FROM simhashes WHERE hash IN ("
+            + placeholders + ")",
+            all_candidates,
+        ).fetchall()
+        candidate_statuses: dict[str, str] = {r[0]: r[1] for r in rows}
+
+        # Phase 3 — targeted Hamming check.
+        # Each candidate is only compared against input hashes whose block
+        # it matched — not against every input hash.
+        threshold = self._threshold
+        for candidate_hash, input_indices in candidate_to_inputs.items():
+            status = candidate_statuses.get(candidate_hash)
+            if status is None:
+                continue  # orphaned index row (stale, registration race, etc.)
+            candidate_int = int(candidate_hash, 16)
+            for i in input_indices:
+                h = hashes[i]
+                if result[h] is not None:
+                    continue  # already matched by an earlier candidate
+                if (hash_ints[h] ^ candidate_int).bit_count() <= threshold:
+                    result[h] = HashStatus(status)
+
+        return result
+
+    def register_batch(self, entries: list[DedupEntry]) -> None:
+        if not entries:
+            return
+        for entry in entries:
+            self._db.execute(
+                "INSERT OR REPLACE INTO simhashes "
+                "(hash, source_id, status, raw_text, model, output) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (entry.recipe_card_hash, entry.source_id, entry.status.value,
+                 entry.raw_text, entry.model, entry.output),
+            )
+            for block_id, block_value in enumerate(self._hash_blocks(entry.recipe_card_hash)):
+                self._db.execute(
+                    "INSERT OR IGNORE INTO simhash_index (block_id, block_value, hash) "
+                    "VALUES (?, ?, ?)",
+                    (block_id, block_value, entry.recipe_card_hash),
+                )
+        self._db.commit()
 
     # ---- SimHash internals ---------------------------------------------
 

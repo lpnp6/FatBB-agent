@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -24,6 +25,19 @@ class HashStatus(str, Enum):
 
     Blocked from future attempts so the same bad file is not re-submitted.
     """
+
+
+@dataclass
+class DedupEntry:
+    """A single entry for batch registration in the dedup store."""
+
+    recipe_card_hash: str
+    status: HashStatus
+    source_id: str | None = None
+    raw_text: str | None = None
+    model: str | None = None
+    output: str | None = None
+    _extra: dict[str, object] = field(default_factory=dict, repr=False)
 
 
 class DedupStore(ABC):
@@ -62,6 +76,20 @@ class DedupStore(ABC):
         Concrete implementations receive a CheckpointStore at construction
         time and expose it here. The orchestrator uses this to delegate
         per-item state transitions without managing two separate stores.
+        """
+        ...
+
+    # ---- factory -------------------------------------------------------------
+
+    @abstractmethod
+    def create_in_memory(self) -> DedupStore:
+        """Return a new, empty instance of the same dedup store type.
+
+        Used by the sampler for in-memory near-duplicate clustering among
+        freshly discovered files — without polluting the persistent store.
+
+        The returned instance must share the same dedup algorithm and
+        threshold as ``self``.
         """
         ...
 
@@ -154,6 +182,37 @@ class DedupStore(ABC):
             raw_text: If provided, store/update the raw markdown.
             model: Model identifier, stored for provenance.
             output: Labeling result JSON, stored for training data.
+        """
+        ...
+
+    # ---- batch operations ----------------------------------------------------
+
+    @abstractmethod
+    def lookup_batch(self, hashes: list[str]) -> dict[str, HashStatus | None]:
+        """Return the current status for every hash in *hashes*.
+
+        One query instead of N individual ``lookup()`` calls.  Keys in the
+        returned dict are exactly the input hashes; values are ``None`` for
+        hashes not yet registered.
+
+        Args:
+            hashes: Content fingerprints to query.
+
+        Returns:
+            Mapping of ``hash -> HashStatus | None``.
+        """
+        ...
+
+    @abstractmethod
+    def register_batch(self, entries: list[DedupEntry]) -> None:
+        """Persist multiple hashes in a single transaction.
+
+        Semantically equivalent to calling ``register()`` for each entry, but
+        implementations should batch-write for throughput.  All entries are
+        written atomically — partial failure rolls back.
+
+        Args:
+            entries: Entries to register together.
         """
         ...
 
