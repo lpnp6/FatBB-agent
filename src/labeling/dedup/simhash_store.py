@@ -62,6 +62,7 @@ class SimHashDedupStore(DedupStore):
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS simhashes ("
             "  hash       TEXT PRIMARY KEY,"
+            "  source_id  TEXT,"
             "  status     TEXT NOT NULL DEFAULT 'in_flight',"
             "  raw_text   TEXT,"
             "  model      TEXT,"
@@ -70,7 +71,7 @@ class SimHashDedupStore(DedupStore):
             ")"
         )
         # Migrate existing tables that lack newer columns
-        for col in ("raw_text", "model", "output"):
+        for col in ("source_id", "raw_text", "model", "output"):
             try:
                 self._db.execute(f"ALTER TABLE simhashes ADD COLUMN {col} TEXT")
             except sqlite3.OperationalError:
@@ -154,6 +155,7 @@ class SimHashDedupStore(DedupStore):
         recipe_card_hash: str,
         status: HashStatus,
         *,
+        source_id: str | None = None,
         raw_text: str | None = None,
         model: str | None = None,
         output: str | None = None,
@@ -173,9 +175,10 @@ class SimHashDedupStore(DedupStore):
         if the hash was previously registered and expired/recovered.
         """
         self._db.execute(
-            "INSERT OR REPLACE INTO simhashes (hash, status, raw_text, model, output) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (recipe_card_hash, status.value, raw_text, model, output),
+            "INSERT OR REPLACE INTO simhashes "
+            "(hash, source_id, status, raw_text, model, output) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (recipe_card_hash, source_id, status.value, raw_text, model, output),
         )
         for block_id, block_value in enumerate(self._hash_blocks(recipe_card_hash)):
             self._db.execute(
@@ -188,6 +191,7 @@ class SimHashDedupStore(DedupStore):
     def update_status(
         self, recipe_card_hash: str, status: HashStatus,
         *,
+        source_id: str | None = None,
         raw_text: str | None = None,
         model: str | None = None,
         output: str | None = None,
@@ -195,6 +199,9 @@ class SimHashDedupStore(DedupStore):
         set_clauses = ["status = ?"]
         params: list[str] = [status.value]
 
+        if source_id is not None:
+            set_clauses.append("source_id = ?")
+            params.append(source_id)
         if raw_text is not None:
             set_clauses.append("raw_text = ?")
             params.append(raw_text)
