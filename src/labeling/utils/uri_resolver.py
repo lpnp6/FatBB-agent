@@ -31,6 +31,28 @@ class URIResolver(ABC):
         """Read the raw document text from *uri*."""
         ...
 
+    # ---- discovery ------------------------------------------------------------
+
+    @abstractmethod
+    def iter_files(
+        self, root: Path | str, *, glob: str = "**/*",
+    ) -> Iterator[tuple[str, str]]:
+        """Walk *root* and yield ``(uri, source_id)`` for every matching document.
+
+        Each concrete implementation discovers documents in its own namespace
+        (local filesystem, S3 bucket, etc.) and yields the canonical URI plus
+        the pre-computed ``source_id`` so the caller can register them without
+        re-reading the document.
+
+        Args:
+            root: Root location to walk (directory path, bucket prefix, …).
+            glob: Pattern for filtering (filesystem-style; S3 may ignore).
+
+        Yields:
+            Tuples of ``(uri, source_id)``.
+        """
+        ...
+
 
 class FileSystemURIResolver(URIResolver):
     """Resolve ``file://`` URIs and local filesystem paths.
