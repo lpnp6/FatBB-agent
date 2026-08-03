@@ -62,17 +62,24 @@ class SimHashDedupStore(DedupStore):
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS simhashes ("
             "  hash       TEXT PRIMARY KEY,"
-            "  source_file TEXT,"
             "  status     TEXT NOT NULL DEFAULT 'in_flight',"
             "  raw_text   TEXT,"
+            "  model      TEXT,"
+            "  output     TEXT,"
             "  created_at TEXT DEFAULT (datetime('now'))"
             ")"
         )
-        # Migrate existing tables that lack the raw_text column
+        # Migrate existing tables that lack newer columns
+        for col in ("raw_text", "model", "output"):
+            try:
+                self._db.execute(f"ALTER TABLE simhashes ADD COLUMN {col} TEXT")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        # Drop legacy source_file column (no longer needed — raw_text supersedes it)
         try:
-            self._db.execute("ALTER TABLE simhashes ADD COLUMN raw_text TEXT")
+            self._db.execute("ALTER TABLE simhashes DROP COLUMN source_file")
         except sqlite3.OperationalError:
-            pass  # column already exists
+            pass  # column already dropped or doesn't exist
         # Block index — T+1 rows per entry, O(1) candidate lookup
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS simhash_index ("
@@ -145,15 +152,16 @@ class SimHashDedupStore(DedupStore):
     def register(
         self,
         recipe_card_hash: str,
-        source_file: str,
         status: HashStatus,
         *,
         raw_text: str | None = None,
+        model: str | None = None,
+        output: str | None = None,
     ) -> None:
         """Persist a hash with its initial status.
 
         Writes to two tables in one transaction:
-            1. simhashes: one row — the authoritative record (hash, file, status, raw_text).
+            1. simhashes: one row — the authoritative record.
             2. simhash_index: T+1 rows — one per 16-bit block of the 64-bit
                SimHash. This is the Manku block index that enables O(1)
                candidate lookup instead of full-table scan.
@@ -165,9 +173,9 @@ class SimHashDedupStore(DedupStore):
         if the hash was previously registered and expired/recovered.
         """
         self._db.execute(
-            "INSERT OR REPLACE INTO simhashes (hash, source_file, status, raw_text) "
-            "VALUES (?, ?, ?, ?)",
-            (recipe_card_hash, source_file, status.value, raw_text),
+            "INSERT OR REPLACE INTO simhashes (hash, status, raw_text, model, output) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (recipe_card_hash, status.value, raw_text, model, output),
         )
         for block_id, block_value in enumerate(self._hash_blocks(recipe_card_hash)):
             self._db.execute(
@@ -181,17 +189,27 @@ class SimHashDedupStore(DedupStore):
         self, recipe_card_hash: str, status: HashStatus,
         *,
         raw_text: str | None = None,
+        model: str | None = None,
+        output: str | None = None,
     ) -> None:
+        set_clauses = ["status = ?"]
+        params: list[str] = [status.value]
+
         if raw_text is not None:
-            self._db.execute(
-                "UPDATE simhashes SET status = ?, raw_text = ? WHERE hash = ?",
-                (status.value, raw_text, recipe_card_hash),
-            )
-        else:
-            self._db.execute(
-                "UPDATE simhashes SET status = ? WHERE hash = ?",
-                (status.value, recipe_card_hash),
-            )
+            set_clauses.append("raw_text = ?")
+            params.append(raw_text)
+        if model is not None:
+            set_clauses.append("model = ?")
+            params.append(model)
+        if output is not None:
+            set_clauses.append("output = ?")
+            params.append(output)
+
+        params.append(recipe_card_hash)
+        self._db.execute(
+            f"UPDATE simhashes SET {', '.join(set_clauses)} WHERE hash = ?",
+            params,
+        )
         self._db.commit()
 
     def expire_stale(self, timeout_minutes: int) -> int:
@@ -215,29 +233,6 @@ class SimHashDedupStore(DedupStore):
         self._db.commit()
         return len(stale)
 
-    def clear_in_flight_by_slugs(self, slugs: set[str]) -> None:
-        if not slugs:
-            return
-        in_placeholders = ",".join("?" * len(slugs))
-        rows = self._db.execute(
-            f"SELECT hash FROM simhashes "
-            f"WHERE status = 'in_flight' AND source_file IN ({in_placeholders})",
-            tuple(slugs),
-        ).fetchall()
-        stale = [r[0] for r in rows]
-        if not stale:
-            return
-
-        out_placeholders = ",".join("?" * len(stale))
-        self._db.execute(
-            f"DELETE FROM simhash_index WHERE hash IN ({out_placeholders})",
-            stale,
-        )
-        self._db.execute(
-            f"DELETE FROM simhashes WHERE hash IN ({out_placeholders})",
-            stale,
-        )
-        self._db.commit()
 
     # ---- SimHash internals ---------------------------------------------
 

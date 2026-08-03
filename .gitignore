@@ -13,9 +13,6 @@ venv/
 
 # Data (large corpus, not version-controlled)
 data/
-src/labeling/dedup/dedup_store.db
-src/labeling/dedup/dedup_store.db-shm
-src/labeling/dedup/dedup_store.db-wal
 
 # Environment
 .env
@@ -33,3 +30,5 @@ llama_cpp_convert/
 convert_hf_to_gguf.py
 
 test_label.py
+
+*.sqlite

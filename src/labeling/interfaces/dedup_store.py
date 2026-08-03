@@ -30,15 +30,17 @@ class DedupStore(ABC):
     """Persistent store of recipe-card content hashes with lifecycle tracking.
 
     Responsibilities:
-        1. Sampling: group duplicate recipe files (same content, different
+        1. Content storage: persist raw recipe markdown alongside its
+           fingerprint, making the dedup store the authoritative source
+           of labeled documents.
+        2. Sampling: group duplicate recipe files (same content, different
            filenames) so only one enters the work queue.
-        2. Labeling gate: check each file's hash BEFORE calling the model.
+        3. Labeling gate: check each file's hash BEFORE calling the model.
            Hashes are registered in IN_FLIGHT state first, preventing
            concurrent duplicate submissions.
-        3. Crash recovery: on restart, the checkpoint manager calls
-           clear_in_flight_by_slugs() with slugs that were in-flight at
-           crash time. Those hashes are removed so the files can be retried.
-        4. Staleness: hung requests that never complete are expired via
+        4. Crash recovery: the embedded CheckpointStore tracks per-item
+           state. On restart, IN_FLIGHT items are reset and retried.
+        5. Staleness: hung requests that never complete are expired via
            expire_stale() so their duplicates can be retried.
 
     Two planned implementations:
@@ -106,10 +108,11 @@ class DedupStore(ABC):
     def register(
         self,
         recipe_card_hash: str,
-        source_file: str,
         status: HashStatus,
         *,
         raw_text: str | None = None,
+        model: str | None = None,
+        output: str | None = None,
     ) -> None:
         """Persist a hash with its initial lifecycle status.
 
@@ -118,11 +121,10 @@ class DedupStore(ABC):
 
         Args:
             recipe_card_hash: Content fingerprint of the recipe card.
-            source_file: Original file path or slug for provenance.
             status: Initial lifecycle state (almost always IN_FLIGHT).
-            raw_text: The raw recipe markdown. Stored alongside the hash
-                so the dedup store becomes the authoritative source of
-                labeled documents — no external manifest needed.
+            raw_text: The raw recipe markdown.
+            model: Model identifier that produced the labeling output.
+            output: The labeling result JSON (only for ACCEPTED records).
         """
         ...
 
@@ -131,33 +133,21 @@ class DedupStore(ABC):
         self, recipe_card_hash: str, status: HashStatus,
         *,
         raw_text: str | None = None,
+        model: str | None = None,
+        output: str | None = None,
     ) -> None:
         """Transition an existing hash to a new status.
 
         Called after processing completes:
-            - Success: update_status(hash, ACCEPTED)
+            - Success: update_status(hash, ACCEPTED, raw_text=..., model=..., output=...)
             - Failure: update_status(hash, REJECTED)
 
         Args:
             recipe_card_hash: Content fingerprint to transition.
             status: Target lifecycle state.
-            raw_text: If provided, store/update the raw markdown for this
-                hash (typically passed when transitioning to ACCEPTED).
-        """
-        ...
-
-    # ---- crash recovery ----------------------------------------------------
-
-    @abstractmethod
-    def clear_in_flight_by_slugs(self, slugs: set[str]) -> None:
-        """Remove IN_FLIGHT entries for the given source_file slugs.
-
-        Called once at startup, after the checkpoint manager identifies
-        files that were IN_FLIGHT at crash time (now reset to pending).
-        This ensures those files can be re-submitted on the next run.
-
-        Args:
-            slugs: Source file slugs that should no longer be IN_FLIGHT.
+            raw_text: If provided, store/update the raw markdown.
+            model: Model identifier, stored for provenance.
+            output: Labeling result JSON, stored for training data.
         """
         ...
 
