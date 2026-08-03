@@ -30,6 +30,7 @@ import sqlite3
 from hashlib import blake2b
 from pathlib import Path
 
+from ..interfaces.checkpoint_store import CheckpointStore
 from ..interfaces.dedup_store import DedupStore, HashStatus
 
 # Number of blocks = threshold + 1  (pigeonhole guarantee)
@@ -48,13 +49,14 @@ class SimHashDedupStore(DedupStore):
                    Drives block partition count: threshold + 1 blocks.
     """
 
-    def __init__(self, db_path: Path, threshold: int = 3):
+    def __init__(self, db_path: Path, threshold: int = 3, *, checkpoint: CheckpointStore | None = None):
         if threshold < 1 or threshold > 15:
             raise ValueError("threshold must be in 1..15")
 
         self._db = sqlite3.connect(str(db_path))
         self._db.execute("PRAGMA journal_mode=WAL")
         self._threshold = threshold
+        self._checkpoint = checkpoint
 
         # Primary table — one row per registered hash
         self._db.execute(
@@ -62,9 +64,15 @@ class SimHashDedupStore(DedupStore):
             "  hash       TEXT PRIMARY KEY,"
             "  source_file TEXT,"
             "  status     TEXT NOT NULL DEFAULT 'in_flight',"
+            "  raw_text   TEXT,"
             "  created_at TEXT DEFAULT (datetime('now'))"
             ")"
         )
+        # Migrate existing tables that lack the raw_text column
+        try:
+            self._db.execute("ALTER TABLE simhashes ADD COLUMN raw_text TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         # Block index — T+1 rows per entry, O(1) candidate lookup
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS simhash_index ("
@@ -75,6 +83,15 @@ class SimHashDedupStore(DedupStore):
             ") WITHOUT ROWID"
         )
         self._db.commit()
+
+    # ---- embedded store ---------------------------------------------------
+
+    @property
+    def checkpoint(self) -> CheckpointStore:
+        """The CheckpointStore embedded in this dedup store."""
+        if self._checkpoint is None:
+            raise RuntimeError("SimHashDedupStore was not constructed with a CheckpointStore")
+        return self._checkpoint
 
     # ---- fingerprint computation ---------------------------------------
 
@@ -130,11 +147,13 @@ class SimHashDedupStore(DedupStore):
         recipe_card_hash: str,
         source_file: str,
         status: HashStatus,
+        *,
+        raw_text: str | None = None,
     ) -> None:
         """Persist a hash with its initial status.
 
         Writes to two tables in one transaction:
-            1. simhashes: one row — the authoritative record (hash, file, status).
+            1. simhashes: one row — the authoritative record (hash, file, status, raw_text).
             2. simhash_index: T+1 rows — one per 16-bit block of the 64-bit
                SimHash. This is the Manku block index that enables O(1)
                candidate lookup instead of full-table scan.
@@ -146,9 +165,9 @@ class SimHashDedupStore(DedupStore):
         if the hash was previously registered and expired/recovered.
         """
         self._db.execute(
-            "INSERT OR REPLACE INTO simhashes (hash, source_file, status) "
-            "VALUES (?, ?, ?)",
-            (recipe_card_hash, source_file, status.value),
+            "INSERT OR REPLACE INTO simhashes (hash, source_file, status, raw_text) "
+            "VALUES (?, ?, ?, ?)",
+            (recipe_card_hash, source_file, status.value, raw_text),
         )
         for block_id, block_value in enumerate(self._hash_blocks(recipe_card_hash)):
             self._db.execute(
@@ -159,12 +178,20 @@ class SimHashDedupStore(DedupStore):
         self._db.commit()
 
     def update_status(
-        self, recipe_card_hash: str, status: HashStatus
+        self, recipe_card_hash: str, status: HashStatus,
+        *,
+        raw_text: str | None = None,
     ) -> None:
-        self._db.execute(
-            "UPDATE simhashes SET status = ? WHERE hash = ?",
-            (status.value, recipe_card_hash),
-        )
+        if raw_text is not None:
+            self._db.execute(
+                "UPDATE simhashes SET status = ?, raw_text = ? WHERE hash = ?",
+                (status.value, raw_text, recipe_card_hash),
+            )
+        else:
+            self._db.execute(
+                "UPDATE simhashes SET status = ? WHERE hash = ?",
+                (status.value, recipe_card_hash),
+            )
         self._db.commit()
 
     def expire_stale(self, timeout_minutes: int) -> int:

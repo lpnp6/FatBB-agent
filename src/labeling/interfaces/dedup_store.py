@@ -108,6 +108,8 @@ class DedupStore(ABC):
         recipe_card_hash: str,
         source_file: str,
         status: HashStatus,
+        *,
+        raw_text: str | None = None,
     ) -> None:
         """Persist a hash with its initial lifecycle status.
 
@@ -118,18 +120,29 @@ class DedupStore(ABC):
             recipe_card_hash: Content fingerprint of the recipe card.
             source_file: Original file path or slug for provenance.
             status: Initial lifecycle state (almost always IN_FLIGHT).
+            raw_text: The raw recipe markdown. Stored alongside the hash
+                so the dedup store becomes the authoritative source of
+                labeled documents — no external manifest needed.
         """
         ...
 
     @abstractmethod
     def update_status(
-        self, recipe_card_hash: str, status: HashStatus
+        self, recipe_card_hash: str, status: HashStatus,
+        *,
+        raw_text: str | None = None,
     ) -> None:
         """Transition an existing hash to a new status.
 
         Called after processing completes:
             - Success: update_status(hash, ACCEPTED)
             - Failure: update_status(hash, REJECTED)
+
+        Args:
+            recipe_card_hash: Content fingerprint to transition.
+            status: Target lifecycle state.
+            raw_text: If provided, store/update the raw markdown for this
+                hash (typically passed when transitioning to ACCEPTED).
         """
         ...
 
