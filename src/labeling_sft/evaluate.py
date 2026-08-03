@@ -31,12 +31,16 @@ import argparse
 import json
 import logging
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from .train import format_example, load_system_prompt
+from labeling.bootstrap.validator import OutputValidator, OutputValidationError
 
 logger = logging.getLogger(__name__)
+
+_validator = OutputValidator()  # shared instance — stateless, thread-safe
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +265,6 @@ def _check_enum_values(output: dict[str, Any]) -> dict[str, int]:
 
 def _per_field_coverages(outputs: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
     """Compute per-field presence counts across all outputs."""
-    from collections import Counter
-
     fields: Counter[str] = Counter()
     for out in outputs:
         dish = out.get("dish")
@@ -306,7 +308,8 @@ def _run_eval_pass(
     tuples for every example that produced valid JSON.
     """
     json_valid = 0
-    schema_valid = 0
+    validator_pass = 0
+    validator_errors: Counter[str] = Counter()
     not_recipe_correct = 0
     not_recipe_total = 0
     all_enum_results: list[dict[str, int]] = []
@@ -344,9 +347,25 @@ def _run_eval_pass(
         if return_predictions:
             per_example.append((i, predicted, generated))
 
-        # Schema validity — basic structural check
-        if isinstance(predicted.get("dish"), dict) or predicted.get("reason") == "not_a_recipe":
-            schema_valid += 1
+        # Schema validity — full OutputValidator check (enums, types, cross-refs, required fields)
+        try:
+            _validator.parse(json_text)
+            validator_pass += 1
+        except OutputValidationError as exc:
+            # Classify the error for breakdown reporting
+            msg = str(exc)
+            if "not found" in msg:
+                validator_errors["cross_ref_mismatch"] += 1
+            elif ": invalid value" in msg:
+                validator_errors["invalid_enum"] += 1
+            elif "expected" in msg:
+                validator_errors["type_mismatch"] += 1
+            elif "required" in msg:
+                validator_errors["missing_required"] += 1
+            elif "reason=not_a_recipe" in msg:
+                validator_errors["bad_non_recipe"] += 1
+            else:
+                validator_errors["other"] += 1
 
         # not_a_recipe accuracy
         if is_not_recipe:
@@ -354,7 +373,7 @@ def _run_eval_pass(
             if predicted.get("dish") is None and predicted.get("reason") == "not_a_recipe":
                 not_recipe_correct += 1
 
-        # Enum accuracy
+        # Enum accuracy (per-field detail, complementary to validator)
         all_enum_results.append(_check_enum_values(predicted))
 
     total = len(gold_records)
@@ -370,8 +389,9 @@ def _run_eval_pass(
         "total_examples": total,
         "json_valid": json_valid,
         "json_validity_pct": round(json_valid / total * 100, 1),
-        "schema_valid": schema_valid,
-        "schema_validity_pct": round(schema_valid / total * 100, 1),
+        "validator_pass": validator_pass,
+        "validator_pass_pct": round(validator_pass / total * 100, 1),
+        "validator_errors": dict(validator_errors),
         "enum_total_fields": total_enum,
         "enum_valid_fields": valid_enum,
         "enum_accuracy_pct": round(enum_acc, 1),
@@ -393,16 +413,21 @@ def _print_metrics(metrics: dict[str, Any], label: str) -> None:
     print(f"\n{'─' * 60}")
     print(f"  {label}")
     print(f"{'─' * 60}")
-    print(f"  Examples:          {metrics['total_examples']}")
-    print(f"  JSON valid:        {metrics['json_valid']}/{metrics['total_examples']} "
+    print(f"  Examples:           {metrics['total_examples']}")
+    print(f"  JSON valid:         {metrics['json_valid']}/{metrics['total_examples']} "
           f"({metrics['json_validity_pct']:.1f}%)")
-    print(f"  Schema valid:      {metrics['schema_valid']}/{metrics['total_examples']} "
-          f"({metrics['schema_validity_pct']:.1f}%)")
-    print(f"  Enum accuracy:     {metrics['enum_valid_fields']}/{metrics['enum_total_fields']} "
+    print(f"  Validator pass:     {metrics['validator_pass']}/{metrics['total_examples']} "
+          f"({metrics['validator_pass_pct']:.1f}%)")
+    if metrics.get("validator_errors"):
+        print(f"  Validator failures:")
+        for err_type, count in sorted(metrics["validator_errors"].items(), key=lambda x: -x[1]):
+            pct = round(count / metrics['total_examples'] * 100, 1)
+            print(f"    {err_type}: {count} ({pct}%)")
+    print(f"  Enum accuracy:      {metrics['enum_valid_fields']}/{metrics['enum_total_fields']} "
           f"({metrics['enum_accuracy_pct']:.1f}%)")
     if metrics["not_a_recipe_total"] > 0:
         na = metrics["not_a_recipe_accuracy_pct"]
-        print(f"  Not-a-recipe acc:  {metrics['not_a_recipe_correct']}/"
+        print(f"  Not-a-recipe acc:   {metrics['not_a_recipe_correct']}/"
               f"{metrics['not_a_recipe_total']} ({na:.1f}%)")
     print(f"  Field coverage:")
     for field, info in metrics["field_coverage"].items():
@@ -475,10 +500,10 @@ def _print_comparison(finetuned: dict[str, Any], base: dict[str, Any]) -> None:
                  f"{finetuned['json_validity_pct']:.1f}%",
                  f"{base['json_validity_pct']:.1f}%",
                  _delta(finetuned['json_validity_pct'], base['json_validity_pct'])))
-    rows.append(("Schema validity %",
-                 f"{finetuned['schema_validity_pct']:.1f}%",
-                 f"{base['schema_validity_pct']:.1f}%",
-                 _delta(finetuned['schema_validity_pct'], base['schema_validity_pct'])))
+    rows.append(("Validator pass %",
+                 f"{finetuned['validator_pass_pct']:.1f}%",
+                 f"{base['validator_pass_pct']:.1f}%",
+                 _delta(finetuned['validator_pass_pct'], base['validator_pass_pct'])))
     rows.append(("Enum accuracy %",
                  f"{finetuned['enum_accuracy_pct']:.1f}%",
                  f"{base['enum_accuracy_pct']:.1f}%",
@@ -531,14 +556,23 @@ def evaluate(
     output_report: str | None = "data/training/eval_report.json",
     *,
     local_files_only: bool = False,
+    max_samples: int | None = None,
 ) -> dict[str, Any]:
-    """Run the evaluation on the fine-tuned model only and return a metrics dict."""
+    """Run the evaluation on the fine-tuned model only and return a metrics dict.
+
+    *max_samples* limits evaluation to the first N records (None = all).
+    """
     val_path = Path(val_file)
     if not val_path.exists():
         raise FileNotFoundError(f"Validation file not found: {val_file}")
 
     with val_path.open("r", encoding="utf-8") as fh:
         gold_records = [json.loads(line) for line in fh if line.strip()]
+
+    if max_samples is not None and max_samples < len(gold_records):
+        gold_records = gold_records[:max_samples]
+        logger.info("Limited to first %d samples (%.1f%% of full set)", max_samples,
+                    max_samples * 100 / len(gold_records))
 
     system_prompt = load_system_prompt()
     model, tokenizer = load_eval_model(adapter_dir, base_model_id, local_files_only=local_files_only)
@@ -572,6 +606,7 @@ def evaluate_with_comparison(
     diff_examples: int = 5,
     *,
     local_files_only: bool = False,
+    max_samples: int | None = None,
 ) -> dict[str, Any]:
     """Evaluate both the fine-tuned and base model, then compare.
 
@@ -580,6 +615,8 @@ def evaluate_with_comparison(
 
     When *diff_examples* > 0, also prints up to that many examples where the
     two models produced different outputs.
+
+    *max_samples* limits evaluation to the first N records (None = all).
     """
     import torch
 
@@ -589,6 +626,11 @@ def evaluate_with_comparison(
 
     with val_path.open("r", encoding="utf-8") as fh:
         gold_records = [json.loads(line) for line in fh if line.strip()]
+
+    if max_samples is not None and max_samples < len(gold_records):
+        gold_records = gold_records[:max_samples]
+        logger.info("Limited to first %d samples (%.1f%% of full set)", max_samples,
+                    max_samples * 100 / len(gold_records))
 
     system_prompt = load_system_prompt()
 
@@ -685,6 +727,10 @@ if __name__ == "__main__":
         "--local_files_only", action="store_true",
         help="Only use locally cached model files; do not attempt to connect to Hugging Face",
     )
+    parser.add_argument(
+        "--max_samples", type=int, default=None,
+        help="Limit evaluation to the first N validation samples (None = all)",
+    )
     args = parser.parse_args()
 
     if args.compare_base:
@@ -695,6 +741,7 @@ if __name__ == "__main__":
             output_report="data/training/eval_comparison.json",
             diff_examples=args.diff_examples,
             local_files_only=args.local_files_only,
+            max_samples=args.max_samples,
         )
     else:
         evaluate(
@@ -703,4 +750,5 @@ if __name__ == "__main__":
             base_model_id=args.base_model_id,
             output_report=args.output_report,
             local_files_only=args.local_files_only,
+            max_samples=args.max_samples,
         )

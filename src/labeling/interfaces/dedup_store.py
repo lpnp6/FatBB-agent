@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .checkpoint_store import CheckpointStore
 
 
 class HashStatus(str, Enum):
@@ -40,7 +44,24 @@ class DedupStore(ABC):
     Two planned implementations:
         - SQLiteDedupStore  (persistent, survives process restarts)
         - MemoryDedupStore  (in-memory set, for unit tests, lost on restart)
+
+    Every concrete implementation embeds a CheckpointStore to track per-item
+    progress through the labeling pipeline (PENDING → IN_FLIGHT →
+    COMPLETED / REJECTED).
     """
+
+    # ---- embedded store -----------------------------------------------------
+
+    @property
+    @abstractmethod
+    def checkpoint(self) -> CheckpointStore:
+        """The CheckpointStore tracking per-item lifecycle for this dedup store.
+
+        Concrete implementations receive a CheckpointStore at construction
+        time and expose it here. The orchestrator uses this to delegate
+        per-item state transitions without managing two separate stores.
+        """
+        ...
 
     # ---- lifecycle queries -------------------------------------------------
 
