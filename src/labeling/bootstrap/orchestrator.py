@@ -39,7 +39,6 @@ class BootstrapOrchestrator(Orchestrator):
         checkpoint: CheckpointStore,
         validator: OutputValidator | None = None,
         retries: int = 2,
-        batch_size: int = 10,
     ) -> None:
         self._client = client
         self._dedup_store = dedup_store
@@ -47,7 +46,7 @@ class BootstrapOrchestrator(Orchestrator):
         self._checkpoint = checkpoint
         self._validator = validator or OutputValidator()
         self._retries = retries
-        self._batch_size = batch_size
+
 
     # ---- Orchestrator interface -------------------------------------------
 
@@ -79,8 +78,7 @@ class BootstrapOrchestrator(Orchestrator):
                 for sid, h, text in batch
             ]
 
-            # Batch-level IN_FLIGHT registration — prevents concurrent runs
-            # from picking up the same items.
+            # Pre-register IN_FLIGHT in dedup + checkpoint.
             self._dedup_store.register_batch([
                 DedupEntry(
                     recipe_card_hash=str(r["recipe_card_hash"]),
@@ -98,7 +96,6 @@ class BootstrapOrchestrator(Orchestrator):
                 *(self._process_one(item) for item in ready),
             )
 
-            # Collect dedup entries for batch flush.
             dedup_entries: list[DedupEntry] = []
             for outcome, entry in results:
                 outcomes.append(outcome)

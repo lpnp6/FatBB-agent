@@ -55,7 +55,7 @@ async def run_default(
     dedup_store = SimHashDedupStore(DEFAULT_DEDUP_DB.resolve(), checkpoint=checkpoint)
     try:
         resolver = FileSystemURIResolver(base_dir=source_dir)
-        sampler = Sampler(resolver, dedup_store, checkpoint)
+        sampler = Sampler(resolver, dedup_store, checkpoint, batch_size=10)
         orchestrator = BootstrapOrchestrator(
             client=OpenAILabelingClient(
                 api_key=api_key,
