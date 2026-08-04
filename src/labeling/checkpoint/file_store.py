@@ -51,7 +51,6 @@ class FileCheckpointStore(CheckpointStore):
                 items[item_id] = {
                     "status": ItemStatus.PENDING.value,
                     "attempts": 0,
-                    "output_line": None,
                     "error": None,
                 }
                 changed = True
@@ -79,13 +78,21 @@ class FileCheckpointStore(CheckpointStore):
         await self._persist()
         return int(item["attempts"])
 
-    async def mark_completed(self, item_id: str, *, output_line: int | None = None) -> None:
+    async def mark_completed(self, item_id: str) -> None:
         item = self._raw_item(item_id)
-        item.update({
-            "status": ItemStatus.COMPLETED.value,
-            "output_line": output_line,
-            "error": None,
-        })
+        item.update({"status": ItemStatus.COMPLETED.value, "error": None})
+        await self._persist()
+
+    async def mark_completed_batch(self, item_ids: list[str]) -> None:
+        """Mark multiple items COMPLETED in one persist."""
+        if not item_ids:
+            return
+        for item_id in item_ids:
+            item = self._raw_item(item_id)
+            item.update({
+                "status": ItemStatus.COMPLETED.value,
+                "error": None,
+            })
         await self._persist()
 
     async def mark_rejected(self, item_id: str, error: str) -> None:

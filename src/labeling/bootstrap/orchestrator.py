@@ -86,8 +86,13 @@ class BootstrapOrchestrator(Orchestrator):
                 outcomes.append(outcome)
                 if entry is not None:
                     dedup_entries.append(entry)
+
             if dedup_entries:
                 self._dedup_store.register_batch(dedup_entries)
+                # Mark checkpoint complete AFTER dedup write succeeds.
+                await self._checkpoint.mark_completed_batch(
+                    [str(e.source_id) for e in dedup_entries],
+                )
 
             if len(outcomes) >= target + holdout:
                 break
@@ -159,7 +164,6 @@ class BootstrapOrchestrator(Orchestrator):
                 "Labeling %s id=%s attempts=%d",
                 outcome, item_id, attempt_num + 1,
             )
-            await self._checkpoint.mark_completed(item_id)
             return outcome, DedupEntry(
                 recipe_card_hash=hash_,
                 status=HashStatus.ACCEPTED,

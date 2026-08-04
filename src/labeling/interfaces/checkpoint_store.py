@@ -109,14 +109,16 @@ class CheckpointStore(ABC):
         ...
 
     @abstractmethod
-    async def mark_completed(self, item_id: str, *, output_line: int | None = None) -> None:
-        """Transition IN_FLIGHT → COMPLETED.
+    async def mark_completed(self, item_id: str) -> None:
+        """Transition IN_FLIGHT → COMPLETED."""
+        ...
 
-        Args:
-            item_id: The manifest item that finished successfully.
-            output_line: Optional line number in the training output file,
-                used by JsonlTrainingWriter for crash recovery. Other writer
-                backends may pass None.
+    @abstractmethod
+    async def mark_completed_batch(self, item_ids: list[str]) -> None:
+        """Transition multiple items to COMPLETED in a single persist.
+
+        Semantically equivalent to calling :meth:`mark_completed` for each id,
+        but implementations should batch the write.
         """
         ...
 
