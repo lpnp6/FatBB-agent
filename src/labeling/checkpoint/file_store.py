@@ -92,6 +92,10 @@ class FileCheckpointStore(CheckpointStore):
         self._raw_item(item_id).update({"status": ItemStatus.REJECTED.value, "error": error})
         await self._persist()
 
+    async def mark_pending(self, item_id: str) -> None:
+        self._raw_item(item_id).update({"status": ItemStatus.PENDING.value})
+        await self._persist()
+
     # ---- monitoring ----------------------------------------------------------
 
     def get_stats(self) -> dict[str, int]:

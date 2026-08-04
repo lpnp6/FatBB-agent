@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..interfaces.dedup_store import DedupEntry, DedupStore, HashStatus
+from ..interfaces.checkpoint_store import CheckpointStore
 from ..interfaces.labeling_client import LabelingClient
 from ..interfaces.orchestrator import Orchestrator
 from ..interfaces.work_queue import WorkQueue
@@ -40,6 +41,7 @@ class BootstrapOrchestrator(Orchestrator):
         dedup_store: DedupStore,
         sampler: Sampler,
         queue: WorkQueue,
+        checkpoint: CheckpointStore,
         validator: OutputValidator | None = None,
         retries: int = 2,
         batch_size: int = 50,
@@ -48,6 +50,7 @@ class BootstrapOrchestrator(Orchestrator):
         self._dedup_store = dedup_store
         self._sampler = sampler
         self._queue = queue
+        self._checkpoint = checkpoint
         self._validator = validator or OutputValidator()
         self._retries = retries
         self._batch_size = batch_size
@@ -63,17 +66,17 @@ class BootstrapOrchestrator(Orchestrator):
         glob: str = "**/*.md",
     ) -> dict[str, Any]:
         await self._queue.load()
+        await self._checkpoint.load()
 
         scanned = 0
         outcomes: list[str] = []
 
-        for batch in self._sampler.sample(root, glob=glob):
+        async for batch in self._sampler.sample(root, glob=glob):
             scanned += len(batch)
 
             records: list[dict[str, Any]] = []
             for sid, h, text in batch:
                 records.append({
-                    "id": f"labeling:{sid}",
                     "source_id": sid,
                     "recipe_card_hash": h,
                     "raw_text": text,
@@ -121,6 +124,8 @@ class BootstrapOrchestrator(Orchestrator):
         raw_text = str(item["raw_text"])
         source_id = str(item.get("source_id", ""))
 
+        await self._checkpoint.mark_in_flight(item_id, hash_)
+
         last_error = ""
         for attempt_num in range(self._retries + 1):
             parsed = None
@@ -166,6 +171,7 @@ class BootstrapOrchestrator(Orchestrator):
                 "Labeling %s id=%s attempts=%d",
                 outcome, item_id, attempt_num + 1,
             )
+            await self._checkpoint.mark_completed(item_id)
             return outcome, DedupEntry(
                 recipe_card_hash=hash_,
                 status=HashStatus.ACCEPTED,
@@ -180,4 +186,5 @@ class BootstrapOrchestrator(Orchestrator):
         # it and re-enqueues; the queue's attempt counter prevents
         # infinite retries.
         logger.error("Labeling exhausted retries id=%s error=%s", item_id, last_error)
+        await self._checkpoint.mark_rejected(item_id, last_error)
         return "failed", None

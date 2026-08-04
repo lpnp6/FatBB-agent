@@ -134,6 +134,11 @@ class CheckpointStore(ABC):
         """
         ...
 
+    @abstractmethod
+    async def mark_pending(self, item_id: str) -> None:
+        """Reset an interrupted item from IN_FLIGHT to PENDING."""
+        ...
+
     # ---- monitoring ----------------------------------------------------------
 
     @abstractmethod

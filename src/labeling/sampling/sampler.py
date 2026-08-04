@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
+from ..interfaces.checkpoint_store import CheckpointStore, ItemStatus
 from ..interfaces.dedup_store import DedupStore, HashStatus
 from ..utils.uri_resolver import URIResolver
 
@@ -29,21 +30,23 @@ class Sampler:
         self,
         resolver: URIResolver,
         dedup: DedupStore,
+        checkpoint: CheckpointStore,
         *,
         batch_size: int = 200,
     ) -> None:
         self._resolver = resolver
         self._dedup = dedup
+        self._checkpoint = checkpoint
         self._batch_size = batch_size
 
     # ---- public API -----------------------------------------------------------
 
-    def sample(
+    async def sample(
         self,
         root: Path | str,
         *,
         glob: str = "**/*.md",
-    ) -> Iterator[list[tuple[str, str, str]]]:
+    ) -> AsyncIterator[list[tuple[str, str, str]]]:
         """Yield batches of unique ``(source_id, hash, raw_text)`` tuples.
 
         Each batch is deduplicated against the persistent store (via
@@ -51,8 +54,9 @@ class Sampler:
         (in-memory near-duplicate clustering).  Only the first item in each
         near-duplicate cluster is kept.
 
-        The caller is responsible for checkpoint filtering, registration,
-        and stopping when enough items have been collected.
+        Checkpoint state is checked before resolving each source. Completed
+        (accepted) and rejected items are skipped. Interrupted IN_FLIGHT
+        items are reset to PENDING and skipped for this run.
         """
         file_iter = self._resolver.iter_files(root, glob=glob)
         mem_dedup = self._dedup.create_in_memory()
@@ -62,9 +66,16 @@ class Sampler:
             if not batch:
                 break
 
-            # Resolve content, compute hashes.
+            # Checkpoint filtering happens before content is resolved.
             resolved: list[tuple[str, str, str]] = []
             for sid in batch:
+                await self._checkpoint.ensure_items([sid])
+                status = self._checkpoint.get_status(sid)
+                if status is ItemStatus.IN_FLIGHT:
+                    await self._checkpoint.mark_pending(sid)
+                    continue
+                if status in (ItemStatus.COMPLETED, ItemStatus.REJECTED):
+                    continue
                 text = self._resolver.resolve(sid)
                 h = self._dedup.recipe_card_hash(text)
                 resolved.append((sid, h, text))
