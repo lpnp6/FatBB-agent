@@ -85,6 +85,23 @@ class CheckpointStore(ABC):
         """
         ...
 
+    # ---- batch filtering -----------------------------------------------------
+
+    @abstractmethod
+    async def select_pending(self, item_ids: list[str]) -> list[str]:
+        """Ensure all *item_ids* exist, reset any IN_FLIGHT ones to PENDING,
+        and return the subset whose status is PENDING (ready to process).
+
+        COMPLETED and REJECTED items are excluded from the result.
+        """
+        ...
+        """Return the number of times this item has been marked IN_FLIGHT.
+
+        Raises:
+            KeyError: If *item_id* was never registered via ensure_items().
+        """
+        ...
+
     # ---- staleness -----------------------------------------------------------
 
     @abstractmethod

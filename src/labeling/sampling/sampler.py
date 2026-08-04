@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
-from ..interfaces.checkpoint_store import CheckpointStore, ItemStatus
+from ..interfaces.checkpoint_store import CheckpointStore
 from ..interfaces.dedup_store import DedupStore, HashStatus
 from ..utils.uri_resolver import URIResolver
 
@@ -66,16 +66,12 @@ class Sampler:
             if not batch:
                 break
 
-            # Checkpoint filtering happens before content is resolved.
+            # Checkpoint filter: only resolve content for items that are
+            # PENDING (new or reset).  IN_FLIGHT items are reset to PENDING
+            # in the same call but excluded — they'll be picked up next run.
+            pending = await self._checkpoint.select_pending(batch)
             resolved: list[tuple[str, str, str]] = []
-            for sid in batch:
-                await self._checkpoint.ensure_items([sid])
-                status = self._checkpoint.get_status(sid)
-                if status is ItemStatus.IN_FLIGHT:
-                    await self._checkpoint.mark_pending(sid)
-                    continue
-                if status in (ItemStatus.COMPLETED, ItemStatus.REJECTED):
-                    continue
+            for sid in pending:
                 text = self._resolver.resolve(sid)
                 h = self._dedup.recipe_card_hash(text)
                 resolved.append((sid, h, text))

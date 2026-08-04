@@ -65,6 +65,43 @@ class FileCheckpointStore(CheckpointStore):
     def get_attempt(self, item_id: str) -> int:
         return int(self._raw_item(item_id)["attempts"])
 
+    # ---- batch filtering -----------------------------------------------------
+
+    async def select_pending(self, item_ids: list[str]) -> list[str]:
+        """Ensure all *item_ids* exist, reset IN_FLIGHT → PENDING, return
+        only the ids that are ready to process."""
+        items: dict[str, dict[str, Any]] = self._state["items"]  # type: ignore[assignment]
+        changed = False
+
+        # Ensure all ids exist.
+        for item_id in item_ids:
+            if item_id not in items:
+                items[item_id] = {
+                    "status": ItemStatus.PENDING.value,
+                    "attempts": 0,
+                    "error": None,
+                }
+                changed = True
+
+        # Select pending, reset in_flight.
+        pending: list[str] = []
+        for item_id in item_ids:
+            status = items[item_id]["status"]
+            if status == ItemStatus.IN_FLIGHT.value:
+                items[item_id]["status"] = ItemStatus.PENDING.value
+                items[item_id]["error"] = None
+                changed = True
+                # Fall through — IN_FLIGHT reset to PENDING, but not returned.
+                # They will be picked up on a subsequent run after the sampler
+                # re-discovers them.
+            elif status == ItemStatus.PENDING.value:
+                pending.append(item_id)
+            # COMPLETED / REJECTED — excluded.
+
+        if changed:
+            await self._persist()
+        return pending
+
     # ---- staleness -----------------------------------------------------------
 
     async def expire_stale(self) -> int:
