@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from email.mime import base
 import json
 import logging
 import os
