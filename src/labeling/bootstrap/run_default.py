@@ -19,7 +19,7 @@ from ..sampling.sampler import Sampler
 from ..utils.uri_resolver import FileSystemURIResolver
 from .orchestrator import BootstrapOrchestrator
 
-DEFAULT_DEDUP_DB = Path("src/labeling/dedup/dedup_store.sqlite")
+DEFAULT_DEDUP_DB = Path("src/labeling/dedup/dedup_store_bootstrap.sqlite")
 
 
 def parse_args() -> argparse.Namespace:
