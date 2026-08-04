@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from email.mime import base
 import json
 import logging
 import os
@@ -61,7 +62,7 @@ async def run_default(
                 model=os.environ.get("OPENAI_MODEL", "deepseek-v4-flash"),
                 label_prompt_builder=RecipeLabelingPromptBuilder(),
                 repair_prompt_builder=RecipeRepairPromptBuilder(),
-                base_url=os.environ.get("OPENAI_BASE_URL"),
+                base_url=base_url
             ),
             dedup_store=dedup_store,
             sampler=sampler,
