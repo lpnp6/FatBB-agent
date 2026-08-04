@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 class URIResolver(ABC):
-    """Resolve a document URI into a stable identifier and raw content."""
+    """Resolve a document identifier into a stable source_id and raw content."""
 
     @abstractmethod
     def source_id(self, uri: str) -> str:
@@ -27,8 +27,13 @@ class URIResolver(ABC):
         ...
 
     @abstractmethod
-    def resolve(self, uri: str) -> str:
-        """Read the raw document text from *uri*."""
+    def resolve(self, source_id: str) -> str:
+        """Read the raw document text identified by *source_id*.
+
+        *source_id* may be a raw URI/path or a ``source_id`` produced by
+        :meth:`source_id` or :meth:`iter_files`.  Concrete implementations
+        decide how to map the identifier back to content.
+        """
         ...
 
     # ---- discovery ------------------------------------------------------------
@@ -36,61 +41,63 @@ class URIResolver(ABC):
     @abstractmethod
     def iter_files(
         self, root: Path | str, *, glob: str = "**/*",
-    ) -> Iterator[tuple[str, str]]:
-        """Walk *root* and yield ``(uri, source_id)`` for every matching document.
+    ) -> Iterator[str]:
+        """Walk *root* and yield a ``source_id`` for every matching document.
 
         Each concrete implementation discovers documents in its own namespace
-        (local filesystem, S3 bucket, etc.) and yields the canonical URI plus
-        the pre-computed ``source_id`` so the caller can register them without
-        re-reading the document.
+        (local filesystem, S3 bucket, etc.).  The yielded ``source_id`` can
+        be passed directly to :meth:`resolve` to read the document content.
 
         Args:
             root: Root location to walk (directory path, bucket prefix, …).
             glob: Pattern for filtering (filesystem-style; S3 may ignore).
 
         Yields:
-            Tuples of ``(uri, source_id)``.
+            ``source_id`` strings.
         """
         ...
 
 
 class FileSystemURIResolver(URIResolver):
-    """Resolve ``file://`` URIs and local filesystem paths.
+    """Resolve local filesystem paths.
 
     Each file path is hashed with BLAKE2b to produce a stable, collision-
-    resistant ``source_id`` independent of absolute path length or encoding.
+    resistant ``source_id``.  During :meth:`iter_files` the resolver builds
+    an internal mapping so ``source_id`` → path resolution is O(1).
     """
 
     def __init__(self, *, base_dir: Path | None = None) -> None:
         self._base_dir = base_dir
+        self._path_of: dict[str, Path] = {}
 
     def source_id(self, uri: str) -> str:
         path = self._resolve_path(uri)
         return f"file:{blake2b(str(path).encode(), digest_size=12).hexdigest()}"
 
-    def resolve(self, uri: str) -> str:
-        path = self._resolve_path(uri)
-        return path.read_text(encoding="utf-8", errors="replace")
+    def resolve(self, source_id: str) -> str:
+        # Fast path: lookup in the iter_files mapping.
+        path = self._path_of.get(source_id)
+        if path is not None:
+            return path.read_text(encoding="utf-8", errors="replace")
+        # Fallback: treat as a raw path / file:// URI.
+        return self._resolve_path(source_id).read_text(encoding="utf-8", errors="replace")
 
     # ---- discovery ------------------------------------------------------------
 
     def iter_files(
         self, root: Path | str, *, glob: str = "**/*",
-    ) -> Iterator[tuple[str, str]]:
-        """Walk *root* and yield ``(uri, source_id)`` for every matching file.
+    ) -> Iterator[str]:
+        """Walk *root* and yield a ``source_id`` for every matching file.
 
-        Args:
-            root: Directory to walk.
-            glob: Pattern passed to :meth:`Path.glob`.  Default ``**/*``
-                matches every file recursively.
-
-        Yields:
-            Tuples of ``(absolute_path_uri, source_id)``.
+        The internal mapping is populated during iteration so subsequent
+        :meth:`resolve` calls are O(1).
         """
         for path in Path(root).glob(glob):
             if path.is_file():
-                uri = str(path.resolve())
-                yield uri, self.source_id(uri)
+                resolved = path.resolve()
+                sid = self.source_id(str(resolved))
+                self._path_of[sid] = resolved
+                yield sid
 
     # ---- internal ------------------------------------------------------------
 

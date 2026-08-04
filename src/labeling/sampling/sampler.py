@@ -1,31 +1,28 @@
-"""Sampler — discover documents, deduplicate, and register a random subset for labeling."""
+"""Sampler — discover documents, deduplicate, and stream unique items for labeling."""
 
 from __future__ import annotations
 
-import random
+from collections.abc import Iterator
 from pathlib import Path
 
-from ..interfaces.dedup_store import DedupEntry, DedupStore, HashStatus
+from ..interfaces.dedup_store import DedupStore, HashStatus
 from ..utils.uri_resolver import URIResolver
 
 
 class Sampler:
-    """Discover files via a URIResolver, deduplicate via DedupStore, and
-    sample a target number for labeling.
+    """Discover files via a URIResolver, deduplicate via DedupStore, and stream
+    unique items in batches.
 
     Files are consumed from the resolver's iterator in batches so the entire
-    corpus is never materialised in memory.  Batch processing stops as soon as
-    enough unique clusters have been accumulated.
+    corpus is never materialised in memory.
 
-    Three layers of deduplication — all through the ``DedupStore`` ABC:
+    Two layers of deduplication:
 
     1. **Existing** — hashes already ACCEPTED / REJECTED / IN_FLIGHT in the
        persistent store are skipped (``lookup_batch``).
-    2. **Near-duplicate clustering** — fresh files are checked against an
-       in-memory instance (``create_in_memory()``).  Only one file per
+    2. **Near-duplicate clustering** — fresh items are checked against an
+       in-memory instance (``create_in_memory()``).  Only one item per
        near-duplicate cluster is kept.
-    3. **Random sampling** — representatives are shuffled and drawn up to
-       the target count.
     """
 
     def __init__(
@@ -33,12 +30,10 @@ class Sampler:
         resolver: URIResolver,
         dedup: DedupStore,
         *,
-        seed: int | None = None,
         batch_size: int = 200,
     ) -> None:
         self._resolver = resolver
         self._dedup = dedup
-        self._rng = random.Random(seed)
         self._batch_size = batch_size
 
     # ---- public API -----------------------------------------------------------
@@ -46,140 +41,62 @@ class Sampler:
     def sample(
         self,
         root: Path | str,
-        target: int,
         *,
-        holdout: int = 0,
         glob: str = "**/*.md",
-    ) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
-        """Walk *root*, deduplicate in batches, sample, and batch-register.
+    ) -> Iterator[list[tuple[str, str, str]]]:
+        """Yield batches of unique ``(source_id, hash, raw_text)`` tuples.
 
-        Returns:
-            ``(labeling_records, holdout_records, report)``.
+        Each batch is deduplicated against the persistent store (via
+        ``lookup_batch``) and against items already yielded in this run
+        (in-memory near-duplicate clustering).  Only the first item in each
+        near-duplicate cluster is kept.
+
+        The caller is responsible for checkpoint filtering, registration,
+        and stopping when enough items have been collected.
         """
-        total_needed = target + holdout
         file_iter = self._resolver.iter_files(root, glob=glob)
-
-        # In-memory dedup store — same algorithm as persistent, separate state
         mem_dedup = self._dedup.create_in_memory()
-
-        # Unique representatives: (uri, source_id, hash) — one per cluster
-        representatives: list[tuple[str, str, str]] = []
-
-        total_scanned = 0
-        total_skipped_by_persistent = 0
-        total_skipped_by_duplicate = 0
 
         while True:
             batch = self._next_batch(file_iter)
             if not batch:
                 break
-            total_scanned += len(batch)
 
-            # Resolve content, compute hashes
+            # Resolve content, compute hashes.
             resolved: list[tuple[str, str, str]] = []
-            for uri, sid in batch:
-                text = self._resolver.resolve(uri)
+            for sid in batch:
+                text = self._resolver.resolve(sid)
                 h = self._dedup.recipe_card_hash(text)
-                resolved.append((uri, sid, h))
+                resolved.append((sid, h, text))
 
-            # Layer 1: filter by persistent dedup store (already processed)
-            hashes = [h for _, _, h in resolved]
+            # Layer 1: filter by persistent dedup store.
+            hashes = [h for _, h, _ in resolved]
             existing = self._dedup.lookup_batch(hashes)
+
+            # Layer 2: filter by in-memory near-duplicate clustering.
             fresh: list[tuple[str, str, str]] = []
-            for item in resolved:
-                if existing.get(item[2]) is None:
-                    fresh.append(item)
-                else:
-                    total_skipped_by_persistent += 1
-
-            # Layer 2: filter by in-memory near-duplicate clustering
-            for uri, sid, h in fresh:
-                if mem_dedup.lookup(h) is not None:
-                    total_skipped_by_duplicate += 1
+            for sid, h, text in resolved:
+                if existing.get(h) is not None:
                     continue
-                # New unique cluster — register in memory and keep
+                if mem_dedup.lookup(h) is not None:
+                    continue
                 mem_dedup.register(h, HashStatus.IN_FLIGHT, source_id=sid)
-                representatives.append((uri, sid, h))
+                fresh.append((sid, h, text))
 
-            if len(representatives) >= total_needed:
-                break
+            if fresh:
+                yield fresh
 
-        if len(representatives) < total_needed:
-            raise ValueError(
-                f"not enough unique clusters after scanning {total_scanned} files: "
-                f"need {total_needed}, have {len(representatives)}"
-            )
+    # ---- internal ------------------------------------------------------------
 
-        # Layer 3: random sample from representatives
-        labeling_records, holdout_records = self._select(
-            representatives, target, holdout,
-        )
+    def _next_batch(self, iterator: Iterator[str]) -> list[str]:
+        """Pull up to ``_batch_size`` source_ids from *iterator*.
 
-        # Batch-register the selected labeling records
-        if labeling_records:
-            self._dedup.register_batch([
-                DedupEntry(
-                    recipe_card_hash=str(r["recipe_card_hash"]),
-                    status=HashStatus.IN_FLIGHT,
-                    source_id=str(r["source_id"]),
-                )
-                for r in labeling_records
-            ])
-
-        report: dict[str, object] = {
-            "total_scanned": total_scanned,
-            "skipped_by_persistent": total_skipped_by_persistent,
-            "skipped_by_duplicate": total_skipped_by_duplicate,
-            "unique_clusters": len(representatives),
-            "labeling_count": len(labeling_records),
-            "holdout_count": len(holdout_records),
-        }
-        return labeling_records, holdout_records, report
-
-    # ---- internal: batching ---------------------------------------------------
-
-    def _next_batch(
-        self, iterator: object,
-    ) -> list[tuple[str, str]]:
-        """Pull up to ``_batch_size`` items from the resolver iterator."""
-        batch: list[tuple[str, str]] = []
+        Returns an empty list when the iterator is exhausted.
+        """
+        batch: list[str] = []
         for _ in range(self._batch_size):
             try:
-                batch.append(next(iterator))  # type: ignore[arg-type]
+                batch.append(next(iterator))
             except StopIteration:
                 break
         return batch
-
-    # ---- internal: selection --------------------------------------------------
-
-    def _select(
-        self,
-        representatives: list[tuple[str, str, str]],
-        target: int,
-        holdout: int,
-    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-        """Shuffle representatives, split into labeling and holdout sets."""
-        pool = representatives.copy()
-        self._rng.shuffle(pool)
-
-        total_needed = target + holdout
-        selected = pool[:total_needed]
-
-        labeling = selected[:target]
-        holdout_list = selected[target:total_needed]
-
-        def _make_records(
-            items: list[tuple[str, str, str]], split: str,
-        ) -> list[dict[str, object]]:
-            return [
-                {
-                    "id": f"{split}:{sid}",
-                    "path": uri,
-                    "source_id": sid,
-                    "recipe_card_hash": h,
-                    "split": split,
-                }
-                for uri, sid, h in items
-            ]
-
-        return _make_records(labeling, "labeling"), _make_records(holdout_list, "holdout")

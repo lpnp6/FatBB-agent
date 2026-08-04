@@ -350,6 +350,36 @@ class SimHashDedupStore(DedupStore):
 
         return result
 
+    def update_status_batch(self, entries: list[DedupEntry]) -> None:
+        """Batch-update status and provenance in a single transaction.
+
+        Each entry's non-None optional fields are written; existing column
+        values are left unchanged when the corresponding field is None.
+        """
+        if not entries:
+            return
+        for entry in entries:
+            set_clauses = ["status = ?"]
+            params: list[str] = [entry.status.value]
+            if entry.source_id is not None:
+                set_clauses.append("source_id = ?")
+                params.append(entry.source_id)
+            if entry.raw_text is not None:
+                set_clauses.append("raw_text = ?")
+                params.append(entry.raw_text)
+            if entry.model is not None:
+                set_clauses.append("model = ?")
+                params.append(entry.model)
+            if entry.output is not None:
+                set_clauses.append("output = ?")
+                params.append(entry.output)
+            params.append(entry.recipe_card_hash)
+            self._db.execute(
+                f"UPDATE simhashes SET {', '.join(set_clauses)} WHERE hash = ?",
+                params,
+            )
+        self._db.commit()
+
     def register_batch(self, entries: list[DedupEntry]) -> None:
         if not entries:
             return

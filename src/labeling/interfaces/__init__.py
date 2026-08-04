@@ -8,6 +8,7 @@ these ABCs. Concrete implementations are injected at the composition root
 from .checkpoint_store import CheckpointStore, ItemStatus
 from .dedup_store import DedupEntry, DedupStore, HashStatus
 from .labeling_client import LabelingClient
+from .orchestrator import Orchestrator
 from .prompt_builder import PromptBuilder
 
-__all__ = ["CheckpointStore", "DedupEntry", "DedupStore", "HashStatus", "ItemStatus", "LabelingClient", "PromptBuilder"]
+__all__ = ["CheckpointStore", "DedupEntry", "DedupStore", "HashStatus", "ItemStatus", "LabelingClient", "Orchestrator", "PromptBuilder"]

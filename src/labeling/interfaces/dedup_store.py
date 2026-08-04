@@ -204,6 +204,22 @@ class DedupStore(ABC):
         ...
 
     @abstractmethod
+    def update_status_batch(self, entries: list[DedupEntry]) -> None:
+        """Batch-update status and provenance for multiple hashes in one transaction.
+
+        Each *DedupEntry* specifies ``recipe_card_hash``, ``status``, and
+        optional ``source_id``, ``raw_text``, ``model``, ``output``.  Unlike
+        :meth:`register_batch`, this does **UPDATE** — every hash must
+        already exist in the store (inserted via :meth:`register` or
+        :meth:`register_batch`).
+
+        Args:
+            entries: Updates to apply.  Fields set to ``None`` are skipped
+                (the existing column value is left unchanged).
+        """
+        ...
+
+    @abstractmethod
     def register_batch(self, entries: list[DedupEntry]) -> None:
         """Persist multiple hashes in a single transaction.
 
