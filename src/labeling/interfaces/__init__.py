@@ -10,5 +10,6 @@ from .dedup_store import DedupEntry, DedupStore, HashStatus
 from .labeling_client import LabelingClient
 from .orchestrator import Orchestrator
 from .prompt_builder import PromptBuilder
+from .work_queue import WorkQueue
 
-__all__ = ["CheckpointStore", "DedupEntry", "DedupStore", "HashStatus", "ItemStatus", "LabelingClient", "Orchestrator", "PromptBuilder"]
+__all__ = ["CheckpointStore", "DedupEntry", "DedupStore", "HashStatus", "ItemStatus", "LabelingClient", "Orchestrator", "PromptBuilder", "WorkQueue"]

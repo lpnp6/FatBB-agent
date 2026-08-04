@@ -1,4 +1,4 @@
-"""Atomic, resume-safe checkpoint storage for bootstrap labeling."""
+"""Persistent FIFO work queue backed by an atomic JSON checkpoint file."""
 
 from __future__ import annotations
 
@@ -10,99 +10,128 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..interfaces.work_queue import WorkQueue
 
-class CheckpointManager:
-    """Persist per-manifest-item progress in a JSON file after every transition."""
 
-    def __init__(self, path: Path, *, manifest_path: Path, output_path: Path) -> None:
+class CheckpointQueue(WorkQueue):
+    """Persist queue state in an atomic JSON file.
+
+    Items track an attempt counter.  :meth:`dequeue` returns items whose
+    attempt count is below *max_attempts*, incrementing the counter each
+    time.  Items that reach the limit are silently dropped — the sampler
+    will still re-discover them, but :meth:`enqueue` skips known ids so
+    they stay dead across runs.
+    """
+
+    def __init__(self, path: Path, *, max_attempts: int = 10) -> None:
         self._path = path
-        self._manifest_path = str(manifest_path)
-        self._output_path = str(output_path)
-        self._state: dict[str, Any] = {}
+        self._items: dict[str, dict[str, Any]] = {}
+        self._max_attempts = max_attempts
         self._lock = asyncio.Lock()
 
-    async def load(self) -> dict[str, Any]:
-        if self._path.exists():
-            self._state = json.loads(self._path.read_text(encoding="utf-8"))
-            if self._state.get("version") != 1:
-                raise ValueError(f"unsupported checkpoint version: {self._state.get('version')!r}")
-        else:
-            self._state = {
-                "version": 1,
-                "manifest_path": self._manifest_path,
-                "output_path": self._output_path,
-                "created_at": self._timestamp(),
-                "items": {},
-            }
-            await self._persist()
-        return self._state
+    # ---- WorkQueue interface ----------------------------------------------
 
-    async def ensure_items(self, item_ids: list[str]) -> None:
-        items = self._state["items"]
+    async def load(self) -> None:
+        if not self._path.exists():
+            return
+        state = json.loads(self._path.read_text(encoding="utf-8"))
+        if state.get("version") != 1:
+            raise ValueError(
+                f"unsupported checkpoint version: {state.get('version')!r}"
+            )
+        self._items = state.get("items", {})
+
+    async def enqueue(self, items: list[dict[str, Any]]) -> None:
+        """Add *items* with ``attempts=0``.  Known ids are left untouched
+        (including items that have exhausted retries — they stay dead)."""
         changed = False
-        for item_id in item_ids:
-            if item_id not in items:
-                items[item_id] = {"status": "pending", "attempts": 0, "output_line": None, "error": None}
-                changed = True
+        for record in items:
+            item_id = str(record["id"])
+            if item_id in self._items:
+                continue
+            self._items[item_id] = {
+                "id": item_id,
+                "source_id": str(record.get("source_id", "")),
+                "recipe_card_hash": str(record.get("recipe_card_hash", "")),
+                "raw_text": str(record.get("raw_text", "")),
+                "attempts": 0,
+            }
+            changed = True
         if changed:
             await self._persist()
 
-    def item(self, item_id: str) -> dict[str, Any]:
-        return self._state["items"][item_id]
+    async def dequeue(self, count: int) -> list[dict[str, Any]]:
+        """Remove and return up to *count* items whose attempt count is
+        below *max_attempts*.  Each returned item's counter is incremented;
+        items that have reached the limit are permanently dropped."""
+        ready: list[dict[str, Any]] = []
+        keys: list[str] = []
+        for key, item in self._items.items():
+            if int(item.get("attempts", 0)) >= self._max_attempts:
+                continue
+            ready.append(item)
+            keys.append(key)
+            if len(ready) >= count:
+                break
 
-    async def mark_in_flight(self, item_id: str, recipe_card_hash: str) -> int:
-        item = self.item(item_id)
-        item.update({
-            "status": "in_flight",
-            "attempts": int(item["attempts"]) + 1,
-            "recipe_card_hash": recipe_card_hash,
-            "error": None,
-        })
-        await self._persist()
-        return int(item["attempts"])
+        for key in keys:
+            item = self._items[key]
+            item["attempts"] = int(item.get("attempts", 0)) + 1
+            if item["attempts"] >= self._max_attempts:
+                # Keep the item in _items as a tombstone so enqueue skips it.
+                pass
+            else:
+                del self._items[key]
 
-    async def mark_completed(self, item_id: str, *, output_line: int | None) -> None:
-        item = self.item(item_id)
-        item.update({"status": "completed", "output_line": output_line, "error": None})
-        await self._persist()
+        if ready:
+            await self._persist()
+        return ready
 
-    async def mark_failed(self, item_id: str, error: str) -> None:
-        self.item(item_id).update({"status": "failed", "error": error})
-        await self._persist()
+    # ---- internal ---------------------------------------------------------
 
     async def _persist(self) -> None:
         async with self._lock:
-            self._state["updated_at"] = self._timestamp()
+            payload = {
+                "version": 1,
+                "updated_at": self._timestamp(),
+                "items": {
+                    item_id: {
+                        k: v for k, v in item.items()
+                        if k != "raw_text"
+                    }
+                    for item_id, item in self._items.items()
+                },
+            }
+            encoded = (
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n"
+            )
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            payload = json.dumps(self._state, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-            descriptor, temporary_name = tempfile.mkstemp(prefix=f".{self._path.name}.", dir=self._path.parent)
+            descriptor, tmp = tempfile.mkstemp(
+                prefix=f".{self._path.name}.", dir=self._path.parent,
+            )
             try:
                 with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                    handle.write(payload)
+                    handle.write(encoded)
                     handle.flush()
                     os.fsync(handle.fileno())
                 try:
-                    os.replace(temporary_name, self._path)
+                    os.replace(tmp, self._path)
                 except PermissionError:
-                    # Windows: os.replace may fail with ERROR_ACCESS_DENIED when the
-                    # target exists.  Rename the old file out of the way first, move
-                    # the new file into place, then remove the backup — the old
-                    # checkpoint is never deleted until the new one is safely in place.
                     backup = tempfile.mktemp(
-                        prefix=f".{self._path.name}.bak.", dir=self._path.parent
+                        prefix=f".{self._path.name}.bak.", dir=self._path.parent,
                     )
                     os.rename(self._path, backup)
                     try:
-                        os.rename(temporary_name, self._path)
+                        os.rename(tmp, self._path)
                     except BaseException:
-                        # Restore the old checkpoint on failure
                         os.rename(backup, self._path)
                         raise
                     else:
                         os.unlink(backup)
             finally:
-                if os.path.exists(temporary_name):
-                    os.unlink(temporary_name)
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
 
     @staticmethod
     def _timestamp() -> str:

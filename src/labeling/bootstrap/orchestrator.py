@@ -8,10 +8,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from .checkpoint import CheckpointManager
 from ..interfaces.dedup_store import DedupEntry, DedupStore, HashStatus
 from ..interfaces.labeling_client import LabelingClient
 from ..interfaces.orchestrator import Orchestrator
+from ..interfaces.work_queue import WorkQueue
 from ..sampling.sampler import Sampler
 from ..utils.validator import OutputValidationError, OutputValidator
 
@@ -20,21 +20,17 @@ logger = logging.getLogger(__name__)
 
 
 class BootstrapOrchestrator(Orchestrator):
-    """Complete bootstrap pipeline: discover → dedup → label → persist.
+    """Complete bootstrap pipeline: discover → enqueue → dequeue → label → persist.
 
     Owns the :class:`Sampler` and drives the full lifecycle:
 
-    1. Stream batches from :meth:`Sampler.iter_batches` (persistent dedup +
-       in-memory near-duplicate clustering already applied).
-    2. Filter each batch against the checkpoint — items already completed or
-       failed in a prior run are skipped before any model call.
-    3. Register fresh items as IN_FLIGHT in both the dedup store and
-       checkpoint, then label / validate / repair concurrently.
-    4. Flush dedup-store updates at each batch boundary.
-
-    Crash recovery: on restart the sampler's persistent dedup filter skips
-    already-ACCEPTED hashes, and the checkpoint filter skips completed/failed
-    items.  No separate training-JSONL recovery is needed.
+    1. Stream batches from :meth:`Sampler.sample`, enqueue into a
+       :class:`WorkQueue`.
+    2. :meth:`WorkQueue.dequeue` destructively pops pending items.
+    3. Label / validate / repair concurrently within each batch.
+    4. On success: write ACCEPTED + provenance to dedup store.
+    5. On failure after all retries: call :meth:`WorkQueue.fail` so the
+       item is never re-enqueued.
     """
 
     def __init__(
@@ -43,7 +39,7 @@ class BootstrapOrchestrator(Orchestrator):
         client: LabelingClient,
         dedup_store: DedupStore,
         sampler: Sampler,
-        checkpoint: CheckpointManager,
+        queue: WorkQueue,
         validator: OutputValidator | None = None,
         retries: int = 2,
         batch_size: int = 50,
@@ -51,7 +47,7 @@ class BootstrapOrchestrator(Orchestrator):
         self._client = client
         self._dedup_store = dedup_store
         self._sampler = sampler
-        self._checkpoint = checkpoint
+        self._queue = queue
         self._validator = validator or OutputValidator()
         self._retries = retries
         self._batch_size = batch_size
@@ -66,114 +62,67 @@ class BootstrapOrchestrator(Orchestrator):
         holdout: int = 0,
         glob: str = "**/*.md",
     ) -> dict[str, Any]:
-        """Run the complete pipeline — sample, checkpoint-filter, label, persist.
+        await self._queue.load()
 
-        Returns a dict with ``"outcomes"`` (label → count) and metadata.
-        """
-        await self._checkpoint.load()
-
-        total_needed = target + holdout
         scanned = 0
-        skipped_by_checkpoint = 0
         outcomes: list[str] = []
 
         for batch in self._sampler.sample(root, glob=glob):
             scanned += len(batch)
 
-            # ── checkpoint filter ──────────────────────────────────────
-            fresh: list[dict[str, Any]] = []
+            records: list[dict[str, Any]] = []
             for sid, h, text in batch:
-                item_id = f"labeling:{sid}"
-                try:
-                    item = self._checkpoint.item(item_id)
-                except KeyError:
-                    item = {"status": "pending"}
-                if item["status"] in ("completed", "failed"):
-                    skipped_by_checkpoint += 1
-                    continue
-                fresh.append({
-                    "id": item_id,
+                records.append({
+                    "id": f"labeling:{sid}",
                     "source_id": sid,
                     "recipe_card_hash": h,
                     "raw_text": text,
                 })
+            await self._queue.enqueue(records)
 
-            if not fresh:
+            ready = await self._queue.dequeue(self._batch_size)
+            if not ready:
                 continue
 
-            # ── register IN_FLIGHT ─────────────────────────────────────
-            self._dedup_store.register_batch([
-                DedupEntry(
-                    recipe_card_hash=str(r["recipe_card_hash"]),
-                    status=HashStatus.IN_FLIGHT,
-                    source_id=str(r["source_id"]),
-                    raw_text=str(r["raw_text"]),
-                )
-                for r in fresh
-            ])
-            await self._checkpoint.ensure_items(
-                [str(r["id"]) for r in fresh],
+            results = await asyncio.gather(
+                *(self._process_one(item) for item in ready),
             )
 
-            # ── process ────────────────────────────────────────────────
-            batch_outcomes = await self._process_batch(fresh)
-            outcomes.extend(batch_outcomes)
+            # Collect dedup entries for batch flush.
+            dedup_entries: list[DedupEntry] = []
+            for outcome, entry in results:
+                outcomes.append(outcome)
+                if entry is not None:
+                    dedup_entries.append(entry)
+            if dedup_entries:
+                self._dedup_store.register_batch(dedup_entries)
 
-            if len(outcomes) >= total_needed:
+            if len(outcomes) >= target + holdout:
                 break
 
         return {
             "outcomes": {s: outcomes.count(s) for s in sorted(set(outcomes))},
             "total_scanned": scanned,
-            "skipped_by_checkpoint": skipped_by_checkpoint,
             "total_processed": len(outcomes),
         }
-
-    # ---- batch processing -------------------------------------------------
-
-    async def _process_batch(
-        self, batch: list[dict[str, Any]],
-    ) -> list[str]:
-        # Process every item concurrently — each returns (outcome, dedup_entry).
-        results = await asyncio.gather(
-            *(self._process_one(entry) for entry in batch),
-        )
-
-        # Collect dedup updates for a single SQL transaction.
-        dedup_entries: list[DedupEntry] = []
-        outcomes: list[str] = []
-        for outcome, dedup_entry in results:
-            outcomes.append(outcome)
-            if dedup_entry is not None:
-                dedup_entries.append(dedup_entry)
-
-        if dedup_entries:
-            self._dedup_store.update_status_batch(dedup_entries)
-
-        return outcomes
 
     # ---- per-item processing ----------------------------------------------
 
     async def _process_one(
-        self, record: dict[str, Any],
+        self, item: dict[str, Any],
     ) -> tuple[str, DedupEntry | None]:
-        """Label, validate, and (on failure) repair a single record.
+        """Label, validate, repair.  Returns staged dedup entry for batch flush.
 
-        Returns:
-            ``(outcome, dedup_entry)``.  *dedup_entry* is ``None`` for skips.
+        On failure after all retries, :meth:`WorkQueue.fail` is called so
+        the item is never re-enqueued.
         """
-        item_id = str(record["id"])
-        hash_ = str(record["recipe_card_hash"])
+        item_id = str(item["id"])
+        hash_ = str(item["recipe_card_hash"])
+        raw_text = str(item["raw_text"])
+        source_id = str(item.get("source_id", ""))
 
-        # Already marked completed in a prior run → skip.
-        item = self._checkpoint.item(item_id)
-        if item["status"] == "completed":
-            return "skipped_completed", None
-
-        raw_text = str(record["raw_text"])
         last_error = ""
-        for _ in range(self._retries + 1):
-            attempt = await self._checkpoint.mark_in_flight(item_id, hash_)
+        for attempt_num in range(self._retries + 1):
             parsed = None
             result = None
             try:
@@ -183,7 +132,7 @@ class BootstrapOrchestrator(Orchestrator):
                 last_error = str(error)
                 logger.warning(
                     "Labeling validation failed id=%s attempt=%d error=%s",
-                    item_id, attempt, last_error,
+                    item_id, attempt_num + 1, last_error,
                 )
                 if result is not None:
                     try:
@@ -191,12 +140,12 @@ class BootstrapOrchestrator(Orchestrator):
                             result.raw_output, last_error,
                         )
                         parsed = self._validator.parse(repaired.raw_output)
-                        logger.info("Repair succeeded id=%s attempt=%d", item_id, attempt)
+                        logger.info("Repair succeeded id=%s attempt=%d", item_id, attempt_num + 1)
                         result = repaired
                     except Exception as repair_error:
                         logger.warning(
                             "Repair failed id=%s attempt=%d error=%s",
-                            item_id, attempt, repair_error,
+                            item_id, attempt_num + 1, repair_error,
                         )
                         continue
                 else:
@@ -205,7 +154,7 @@ class BootstrapOrchestrator(Orchestrator):
                 last_error = str(error)
                 logger.warning(
                     "Labeling attempt failed id=%s attempt=%d error=%s",
-                    item_id, attempt, last_error,
+                    item_id, attempt_num + 1, last_error,
                 )
                 continue
 
@@ -213,23 +162,22 @@ class BootstrapOrchestrator(Orchestrator):
                 continue
 
             outcome = "not_a_recipe" if parsed.is_not_a_recipe else "completed"
-
-            await self._checkpoint.mark_completed(item_id, output_line=None)
             logger.info(
                 "Labeling %s id=%s attempts=%d",
-                outcome, item_id, attempt,
+                outcome, item_id, attempt_num + 1,
             )
             return outcome, DedupEntry(
                 recipe_card_hash=hash_,
                 status=HashStatus.ACCEPTED,
+                source_id=source_id,
                 raw_text=raw_text,
                 model=result.model,
                 output=json.dumps(parsed.normalized_json, ensure_ascii=False),
             )
 
-        # All retries exhausted.
-        await self._checkpoint.mark_failed(item_id, last_error)
+        # All retries exhausted.  The item is gone from the queue
+        # (dequeued destructively).  On next run the sampler re-discovers
+        # it and re-enqueues; the queue's attempt counter prevents
+        # infinite retries.
         logger.error("Labeling exhausted retries id=%s error=%s", item_id, last_error)
-        return "failed", DedupEntry(
-            recipe_card_hash=hash_, status=HashStatus.REJECTED,
-        )
+        return "failed", None

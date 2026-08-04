@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from .train import format_example, load_system_prompt
-from labeling.bootstrap.validator import OutputValidator, OutputValidationError
+from labeling.utils.validator import OutputValidator, OutputValidationError
 
 logger = logging.getLogger(__name__)
 
