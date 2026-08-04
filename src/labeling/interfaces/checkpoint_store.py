@@ -114,6 +114,17 @@ class CheckpointStore(ABC):
         ...
 
     @abstractmethod
+    async def mark_in_flight_batch(
+        self, items: list[tuple[str, str]],
+    ) -> None:
+        """Transition multiple items to IN_FLIGHT in a single persist.
+
+        Args:
+            items: List of ``(item_id, recipe_card_hash)`` tuples.
+        """
+        ...
+
+    @abstractmethod
     async def mark_completed_batch(self, item_ids: list[str]) -> None:
         """Transition multiple items to COMPLETED in a single persist.
 

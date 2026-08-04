@@ -83,6 +83,22 @@ class FileCheckpointStore(CheckpointStore):
         item.update({"status": ItemStatus.COMPLETED.value, "error": None})
         await self._persist()
 
+    async def mark_in_flight_batch(
+        self, items: list[tuple[str, str]],
+    ) -> None:
+        """Mark multiple items IN_FLIGHT in one persist."""
+        if not items:
+            return
+        for item_id, recipe_card_hash in items:
+            item = self._raw_item(item_id)
+            item.update({
+                "status": ItemStatus.IN_FLIGHT.value,
+                "attempts": int(item["attempts"]) + 1,
+                "recipe_card_hash": recipe_card_hash,
+                "error": None,
+            })
+        await self._persist()
+
     async def mark_completed_batch(self, item_ids: list[str]) -> None:
         """Mark multiple items COMPLETED in one persist."""
         if not item_ids:

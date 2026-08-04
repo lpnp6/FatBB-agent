@@ -39,7 +39,7 @@ class BootstrapOrchestrator(Orchestrator):
         checkpoint: CheckpointStore,
         validator: OutputValidator | None = None,
         retries: int = 2,
-        batch_size: int = 50,
+        batch_size: int = 10,
     ) -> None:
         self._client = client
         self._dedup_store = dedup_store
@@ -60,6 +60,9 @@ class BootstrapOrchestrator(Orchestrator):
         glob: str = "**/*.md",
     ) -> dict[str, Any]:
         await self._checkpoint.load()
+        # Clean up IN_FLIGHT items left by a previous crash so they can be
+        # re-discovered and re-processed.
+        self._dedup_store.expire_stale(timeout_minutes=0)
 
         scanned = 0
         outcomes: list[str] = []
@@ -76,6 +79,21 @@ class BootstrapOrchestrator(Orchestrator):
                 for sid, h, text in batch
             ]
 
+            # Batch-level IN_FLIGHT registration — prevents concurrent runs
+            # from picking up the same items.
+            self._dedup_store.register_batch([
+                DedupEntry(
+                    recipe_card_hash=str(r["recipe_card_hash"]),
+                    status=HashStatus.IN_FLIGHT,
+                    source_id=str(r["source_id"]),
+                )
+                for r in ready
+            ])
+            await self._checkpoint.mark_in_flight_batch([
+                (str(r["source_id"]), str(r["recipe_card_hash"]))
+                for r in ready
+            ])
+
             results = await asyncio.gather(
                 *(self._process_one(item) for item in ready),
             )
@@ -89,7 +107,6 @@ class BootstrapOrchestrator(Orchestrator):
 
             if dedup_entries:
                 self._dedup_store.register_batch(dedup_entries)
-                # Mark checkpoint complete AFTER dedup write succeeds.
                 await self._checkpoint.mark_completed_batch(
                     [str(e.source_id) for e in dedup_entries],
                 )
@@ -116,8 +133,6 @@ class BootstrapOrchestrator(Orchestrator):
         hash_ = str(item["recipe_card_hash"])
         raw_text = str(item["raw_text"])
         source_id = item_id
-
-        await self._checkpoint.mark_in_flight(item_id, hash_)
 
         last_error = ""
         for attempt_num in range(self._retries + 1):
