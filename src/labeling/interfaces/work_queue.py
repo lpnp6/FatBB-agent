@@ -1,4 +1,4 @@
-"""WorkQueue — abstract FIFO queue with crash recovery for the labeling pipeline."""
+"""WorkQueue — pluggable FIFO boundary for future distributed workers."""
 
 from __future__ import annotations
 
@@ -7,33 +7,19 @@ from typing import Any
 
 
 class WorkQueue(ABC):
-    """Persistent FIFO queue for labeling work items.
-
-    :meth:`dequeue` destructively removes items from the queue.  If the
-    process crashes between *dequeue* and the dedup-store write, the item
-    is re-discovered by the sampler on the next run (its hash is not yet
-    in the dedup store) and re-enqueued.
-    """
+    """Queue contract for optional asynchronous or distributed execution."""
 
     @abstractmethod
     async def load(self) -> None:
-        """Restore queue state from storage.  No-op on first run."""
+        """Initialize the queue connection or local state."""
         ...
 
     @abstractmethod
     async def enqueue(self, items: list[dict[str, Any]]) -> None:
-        """Add *items* to the queue.  Known ids are left untouched.
-
-        Each item dict must contain at least ``"id"``.
-        """
+        """Add work items to the queue."""
         ...
 
     @abstractmethod
     async def dequeue(self, count: int) -> list[dict[str, Any]]:
-        """Remove and return up to *count* items.
-
-        Items are permanently removed from the queue.  If the process
-        crashes the sampler re-discovers unprocessed items on the next
-        run and re-enqueues them.
-        """
+        """Return up to *count* work items for processing."""
         ...

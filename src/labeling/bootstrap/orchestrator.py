@@ -12,7 +12,6 @@ from ..interfaces.dedup_store import DedupEntry, DedupStore, HashStatus
 from ..interfaces.checkpoint_store import CheckpointStore
 from ..interfaces.labeling_client import LabelingClient
 from ..interfaces.orchestrator import Orchestrator
-from ..interfaces.work_queue import WorkQueue
 from ..sampling.sampler import Sampler
 from ..utils.validator import OutputValidationError, OutputValidator
 
@@ -21,17 +20,14 @@ logger = logging.getLogger(__name__)
 
 
 class BootstrapOrchestrator(Orchestrator):
-    """Complete bootstrap pipeline: discover → enqueue → dequeue → label → persist.
+    """Complete bootstrap pipeline: discover → label → persist.
 
     Owns the :class:`Sampler` and drives the full lifecycle:
 
-    1. Stream batches from :meth:`Sampler.sample`, enqueue into a
-       :class:`WorkQueue`.
-    2. :meth:`WorkQueue.dequeue` destructively pops pending items.
-    3. Label / validate / repair concurrently within each batch.
-    4. On success: write ACCEPTED + provenance to dedup store.
-    5. On failure after all retries: call :meth:`WorkQueue.fail` so the
-       item is never re-enqueued.
+    1. Stream batches from :meth:`Sampler.sample`.
+    2. Label / validate / repair concurrently within each batch.
+    3. On success: write ACCEPTED + provenance to dedup store.
+    4. Checkpoint state provides resume behavior.
     """
 
     def __init__(
@@ -40,7 +36,6 @@ class BootstrapOrchestrator(Orchestrator):
         client: LabelingClient,
         dedup_store: DedupStore,
         sampler: Sampler,
-        queue: WorkQueue,
         checkpoint: CheckpointStore,
         validator: OutputValidator | None = None,
         retries: int = 2,
@@ -49,7 +44,6 @@ class BootstrapOrchestrator(Orchestrator):
         self._client = client
         self._dedup_store = dedup_store
         self._sampler = sampler
-        self._queue = queue
         self._checkpoint = checkpoint
         self._validator = validator or OutputValidator()
         self._retries = retries
@@ -65,7 +59,6 @@ class BootstrapOrchestrator(Orchestrator):
         holdout: int = 0,
         glob: str = "**/*.md",
     ) -> dict[str, Any]:
-        await self._queue.load()
         await self._checkpoint.load()
 
         scanned = 0
@@ -74,18 +67,14 @@ class BootstrapOrchestrator(Orchestrator):
         async for batch in self._sampler.sample(root, glob=glob):
             scanned += len(batch)
 
-            records: list[dict[str, Any]] = []
-            for sid, h, text in batch:
-                records.append({
+            ready = [
+                {
                     "source_id": sid,
                     "recipe_card_hash": h,
                     "raw_text": text,
-                })
-            await self._queue.enqueue(records)
-
-            ready = await self._queue.dequeue(self._batch_size)
-            if not ready:
-                continue
+                }
+                for sid, h, text in batch
+            ]
 
             results = await asyncio.gather(
                 *(self._process_one(item) for item in ready),
@@ -116,13 +105,12 @@ class BootstrapOrchestrator(Orchestrator):
     ) -> tuple[str, DedupEntry | None]:
         """Label, validate, repair.  Returns staged dedup entry for batch flush.
 
-        On failure after all retries, :meth:`WorkQueue.fail` is called so
-        the item is never re-enqueued.
+        On failure after all retries, the checkpoint is marked rejected.
         """
-        item_id = str(item["id"])
+        item_id = str(item["source_id"])
         hash_ = str(item["recipe_card_hash"])
         raw_text = str(item["raw_text"])
-        source_id = str(item.get("source_id", ""))
+        source_id = item_id
 
         await self._checkpoint.mark_in_flight(item_id, hash_)
 
@@ -181,10 +169,7 @@ class BootstrapOrchestrator(Orchestrator):
                 output=json.dumps(parsed.normalized_json, ensure_ascii=False),
             )
 
-        # All retries exhausted.  The item is gone from the queue
-        # (dequeued destructively).  On next run the sampler re-discovers
-        # it and re-enqueues; the queue's attempt counter prevents
-        # infinite retries.
+        # All retries exhausted. The sampler skips rejected items on later runs.
         logger.error("Labeling exhausted retries id=%s error=%s", item_id, last_error)
         await self._checkpoint.mark_rejected(item_id, last_error)
         return "failed", None

@@ -14,11 +14,11 @@ import os
 from pathlib import Path
 
 from ..clients import OpenAILabelingClient
+from ..checkpoint.file_store import FileCheckpointStore
 from ..dedup.simhash_store import SimHashDedupStore
 from ..prompts import RecipeLabelingPromptBuilder, RecipeRepairPromptBuilder
 from ..sampling.sampler import Sampler
 from ..utils.uri_resolver import FileSystemURIResolver
-from .checkpoint import CheckpointQueue
 from .orchestrator import BootstrapOrchestrator
 
 
@@ -60,11 +60,12 @@ def main() -> None:
     )
 
     source_dir = args.source_dir.expanduser().resolve()
-    dedup_store = SimHashDedupStore(args.dedup_db.resolve())
+    checkpoint = FileCheckpointStore(output_dir / "item_checkpoint.json")
+    dedup_store = SimHashDedupStore(args.dedup_db.resolve(), checkpoint=checkpoint)
 
     try:
         resolver = FileSystemURIResolver(base_dir=source_dir)
-        sampler = Sampler(resolver, dedup_store)
+        sampler = Sampler(resolver, dedup_store, checkpoint)
 
         orchestrator = BootstrapOrchestrator(
             client=OpenAILabelingClient(
@@ -76,7 +77,7 @@ def main() -> None:
             ),
             dedup_store=dedup_store,
             sampler=sampler,
-            queue=CheckpointQueue(output_dir / "checkpoint.json"),
+            checkpoint=checkpoint,
             retries=args.retries,
         )
 
