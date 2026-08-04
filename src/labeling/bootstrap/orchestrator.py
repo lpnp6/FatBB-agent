@@ -59,9 +59,9 @@ class BootstrapOrchestrator(Orchestrator):
         glob: str = "**/*.md",
     ) -> dict[str, Any]:
         await self._checkpoint.load()
-        # Clean up IN_FLIGHT items left by a previous crash so they can be
-        # re-discovered and re-processed.
+        # Reset items left IN_FLIGHT by a previous crash.
         self._dedup_store.expire_stale(timeout_minutes=0)
+        await self._checkpoint.expire_stale()
 
         scanned = 0
         outcomes: list[str] = []

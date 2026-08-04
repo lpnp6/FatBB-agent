@@ -65,6 +65,22 @@ class FileCheckpointStore(CheckpointStore):
     def get_attempt(self, item_id: str) -> int:
         return int(self._raw_item(item_id)["attempts"])
 
+    # ---- staleness -----------------------------------------------------------
+
+    async def expire_stale(self) -> int:
+        """Remove all IN_FLIGHT items — they will be re-created as PENDING
+        by the next :meth:`ensure_items` call."""
+        items: dict[str, dict[str, Any]] = self._state["items"]  # type: ignore[assignment]
+        stale = [
+            iid for iid, item in items.items()
+            if item.get("status") == ItemStatus.IN_FLIGHT.value
+        ]
+        for iid in stale:
+            del items[iid]
+        if stale:
+            await self._persist()
+        return len(stale)
+
     # ---- state transitions ---------------------------------------------------
 
     async def mark_in_flight(self, item_id: str, recipe_card_hash: str) -> int:

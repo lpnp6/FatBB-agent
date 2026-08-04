@@ -85,6 +85,17 @@ class CheckpointStore(ABC):
         """
         ...
 
+    # ---- staleness -----------------------------------------------------------
+
+    @abstractmethod
+    async def expire_stale(self) -> int:
+        """Remove all IN_FLIGHT items and return the count.
+
+        Called at startup to forget items left in-flight by a previous crash
+        so they can be re-discovered and re-created as PENDING.
+        """
+        ...
+
     # ---- state transitions ---------------------------------------------------
 
     @abstractmethod
