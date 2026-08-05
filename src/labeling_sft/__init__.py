@@ -41,6 +41,7 @@ from labeling_sft.dataset_builders import BuildFromFileDatasetBuilder, SqliteLoc
 from labeling_sft.dataset_loaders import LocalJsonlDatasetLoader
 from labeling_sft.evaluators import QwenEvaluator
 from labeling_sft.exporters import GGUFExporter
+from labeling_sft.orchestrator import PipelineResult, SFTOrchestrator
 from labeling_sft.trainers import QLoRATrainer
 
 __all__ = [
@@ -73,4 +74,6 @@ __all__ = [
     "QLoRATrainer",
     "GGUFExporter",
     "QwenEvaluator",
+    "PipelineResult",
+    "SFTOrchestrator",
 ]
