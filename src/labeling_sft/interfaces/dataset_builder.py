@@ -14,8 +14,7 @@ class BaseDatasetBuilder(ABC):
     they are intentionally unaware of the data source.
 
     Concrete implementations:
-        - :class:`~labeling_sft.dataset_builders.bootstrap.BootstrapDatasetBuilder`
-        - Future: ``SyntheticDatasetBuilder``, ``MultiSourceDatasetBuilder``, ...
+        - :class:`~labeling_sft.dataset_builders.build_from_file.BuildFromFileDatasetBuilder`
     """
 
     @abstractmethod

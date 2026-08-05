@@ -138,6 +138,34 @@ class MemoryDedupStore(DedupStore):
 
 **Storage**: SQLite file at `src/labeling/dedup/dedup_store.db`. Lightweight (~1KB per 1000 entries). The same store is used during bootstrap labeling AND production auto-labeling — preventing both duplicate API costs and duplicate training data.
 
+### SimHash 标签记录表
+
+`SimHashDedupStore` 中可作为训练数据来源的只有 `simhashes` 记录表。其字段如下：
+
+```sql
+CREATE TABLE simhashes (
+  hash       TEXT PRIMARY KEY,
+  source_id  TEXT,
+  status     TEXT NOT NULL DEFAULT 'in_flight',
+  raw_text   TEXT,
+  model      TEXT,
+  output     TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+```
+
+`build_from_db` 只读取已完成且具有原文与标注的记录：
+
+```sql
+SELECT raw_text, output
+FROM simhashes
+WHERE status = 'completed'
+  AND raw_text IS NOT NULL
+  AND output IS NOT NULL;
+```
+
+字段映射：`raw_text` → Alpaca `input`，`output` → Alpaca `output`，builder 提供固定的 Alpaca `instruction`。`hash`、`source_id`、`model` 与 `created_at` 保留为记录溯源字段，不参与样本内容构造。
+
 Expected dedup: ~200-400 files removed from the raw corpus before model calls.
 
 ### Three-Round Sampling (with Checkpoint)
