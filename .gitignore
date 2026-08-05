@@ -34,3 +34,5 @@ test_label.py
 *.sqlite
 
 tests/
+
+configs/
