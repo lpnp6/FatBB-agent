@@ -21,6 +21,7 @@ from labeling_sft.contracts import (
 )
 from labeling_sft.interfaces.config import BaseConfig
 from labeling_sft.interfaces.dataset_builder import BaseDatasetBuilder
+from labeling_sft.interfaces.dataset_loader import BaseDatasetLoader
 from labeling_sft.interfaces.evaluator import BaseEvaluator
 from labeling_sft.interfaces.exporter import BaseExporter
 from labeling_sft.interfaces.trainer import BaseTrainer
@@ -42,6 +43,7 @@ __all__ = [
     # ABCs
     "BaseConfig",
     "BaseDatasetBuilder",
+    "BaseDatasetLoader",
     "BaseEvaluator",
     "BaseExporter",
     "BaseTrainer",

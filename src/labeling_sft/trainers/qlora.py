@@ -13,13 +13,14 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 from pathlib import Path
 from typing import Any
 
 from labeling_sft.configs.qlora import QLoRAConfig, _qlora_config_fields
-from labeling_sft.contracts import DataLocation, DataLocationType, DatasetSplit, TrainingResult
+from labeling_sft.contracts import DatasetRecord, DatasetSplit, TrainingResult
+from labeling_sft.dataset_loaders import LocalJsonlDatasetLoader
+from labeling_sft.interfaces.dataset_loader import BaseDatasetLoader
 from labeling_sft.interfaces.trainer import BaseTrainer
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 def _gpu_snapshot(tag: str) -> None:
     """Log current GPU memory state with a human-readable *tag*."""
-    import torch
+    import torch # pyright: ignore[reportMissingImports]
 
     if not torch.cuda.is_available():
         logger.info("[mem] %s | CUDA unavailable", tag)
@@ -61,7 +62,7 @@ def _make_memory_watchdog(
     max_eval_snapshots: int = 3,
 ):
     """Return a ``TrainerCallback`` subclass that snapshots GPU memory."""
-    from transformers import TrainerCallback
+    from transformers import TrainerCallback # pyright: ignore[reportMissingImports]
 
     class _Watchdog(TrainerCallback):
         def __init__(self, max_train: int, max_eval: int):
@@ -153,14 +154,19 @@ class _CompletionOnlyCollator:
 # ---------------------------------------------------------------------------
 
 class QLoRATrainer(BaseTrainer):
-    """QLoRA fine-tuning trainer for Qwen2.5-3B-Instruct.
+    """QLoRA fine-tuning trainer for causal language models.
 
     Pipeline: load data → load 4-bit model + apply LoRA → tokenize → train.
+    The configured model must be compatible with the selected LoRA modules.
     """
 
     config: QLoRAConfig
 
-    def __init__(self, config: QLoRAConfig) -> None:
+    def __init__(
+        self,
+        config: QLoRAConfig,
+        dataset_loader: BaseDatasetLoader,
+    ) -> None:
         super().__init__(config)
         if (
             not config.project_name
@@ -168,6 +174,7 @@ class QLoRATrainer(BaseTrainer):
             or not config.system_prompt_path
         ):
             raise ValueError("project_name and system_prompt_path are required")
+        self._dataset_loader = dataset_loader
         self._configure_logging(config.project_name)
 
     # ── BaseTrainer implementation ──────────────────────────────────────
@@ -176,22 +183,10 @@ class QLoRATrainer(BaseTrainer):
         self,
         split: DatasetSplit,
     ) -> tuple[Any, Any]:
-        """Load and format training / validation JSONL files."""
-        train_file = self._local_jsonl_path(split.train, "train")
-        val_file = self._local_jsonl_path(split.val, "val")
-        for name, path in [("train", train_file), ("val", val_file)]:
-            if not path.exists():
-                raise FileNotFoundError(
-                    f"{name} file not found: {path}\n"
-                    f"  Run: python -m labeling_sft.dataset_builder --output_dir {self.config.output_dir}"
-                )
-            if path.stat().st_size == 0:
-                raise ValueError(f"{name} file is empty: {path}")
-
+        """Load standardized records from the dataset split and format them."""
         system_prompt = load_system_prompt(self.config.system_prompt_path)
-
-        train_examples = self._load_jsonl(str(train_file), system_prompt)
-        val_examples = self._load_jsonl(str(val_file), system_prompt)
+        train_examples = self._format_records(self._dataset_loader.load(split.train), system_prompt)
+        val_examples = self._format_records(self._dataset_loader.load(split.val), system_prompt)
         _gpu_snapshot("after dataset load (CPU)")
 
         return train_examples, val_examples
@@ -213,6 +208,7 @@ class QLoRATrainer(BaseTrainer):
         from transformers import EarlyStoppingCallback, Trainer, TrainingArguments
 
         if not torch.cuda.is_available():
+            logger.error("CUDA GPU is required for QLoRA training, but no GPU was detected")
             raise RuntimeError(
                 "CUDA GPU is required for QLoRA training. "
                 "No GPU detected — check that PyTorch was installed with CUDA support "
@@ -355,34 +351,25 @@ class QLoRATrainer(BaseTrainer):
         logger.propagate = False
 
     @staticmethod
-    def _local_jsonl_path(location: DataLocation, name: str) -> Path:
-        if location.type is not DataLocationType.LOCAL_PATH:
-            raise NotImplementedError(
-                f"QLoRATrainer only supports local JSONL; "
-                f"{name} uses {location.type.value}"
-            )
-        return Path(location.value)
-
-    @staticmethod
-    def _load_jsonl(jsonl_path: str, system_prompt: str) -> list[dict[str, str]]:
-        """Load an Alpaca-format JSONL file, returning formatted text strings."""
-        path = Path(jsonl_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Dataset file not found: {jsonl_path}")
-
-        examples: list[dict[str, str]] = []
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                record = json.loads(line)
-                examples.append({
-                    "text": format_example(record, system_prompt),
-                    "output": record["output"],
-                })
-
-        logger.info("Loaded %d examples from %s", len(examples), jsonl_path)
+    def _format_records(
+        records: list[DatasetRecord], system_prompt: str
+    ) -> list[dict[str, str]]:
+        """Apply the chat template to standardized dataset records."""
+        examples = [
+            {
+                "text": format_example(
+                    {
+                        "instruction": record.instruction,
+                        "input": record.input,
+                        "output": record.output,
+                    },
+                    system_prompt,
+                ),
+                "output": record.output,
+            }
+            for record in records
+        ]
+        logger.info("Loaded %d examples", len(examples))
         return examples
 
     def _load_base_model_and_tokenizer(self) -> tuple[Any, Any]:

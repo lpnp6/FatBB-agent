@@ -28,6 +28,7 @@ from labeling_sft.interfaces import (
     # ABCs
     BaseConfig,
     BaseDatasetBuilder,
+    BaseDatasetLoader,
     BaseEvaluator,
     BaseExporter,
     BaseTrainer,
@@ -36,6 +37,7 @@ from labeling_sft.interfaces import (
 # ── Concrete implementations ──────────────────────────────────────────────
 from labeling_sft.configs import QLoRAConfig
 from labeling_sft.dataset_builders import BuildFromFileDatasetBuilder, SqliteLocalBuilder
+from labeling_sft.dataset_loaders import LocalJsonlDatasetLoader
 from labeling_sft.evaluators import QwenEvaluator
 from labeling_sft.exporters import GGUFExporter, MergeExporter
 from labeling_sft.trainers import QLoRATrainer
@@ -57,6 +59,7 @@ __all__ = [
     # ABCs
     "BaseConfig",
     "BaseDatasetBuilder",
+    "BaseDatasetLoader",
     "BaseEvaluator",
     "BaseExporter",
     "BaseTrainer",
@@ -64,6 +67,7 @@ __all__ = [
     "QLoRAConfig",
     "SqliteLocalBuilder",
     "BuildFromFileDatasetBuilder",
+    "LocalJsonlDatasetLoader",
     "QLoRATrainer",
     "MergeExporter",
     "GGUFExporter",
