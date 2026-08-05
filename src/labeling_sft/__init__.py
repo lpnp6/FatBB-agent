@@ -6,7 +6,7 @@ Package structure::
     configs/            Config implementations (QLoRAConfig, ...)
     dataset_builders/   DatasetBuilder implementations (Bootstrap, ...)
     trainers/           Trainer implementations (QLoRA, ...)
-    exporters/          Exporter implementations (Merge, GGUF, ...)
+    exporters/          Exporter implementations (GGUF, ...)
     evaluators/         Evaluator implementations (Qwen, ...)
 """
 
@@ -27,6 +27,7 @@ from labeling_sft.interfaces import (
     TrainingResult,
     # ABCs
     BaseConfig,
+    BaseArtifactStore,
     BaseDatasetBuilder,
     BaseDatasetLoader,
     BaseEvaluator,
@@ -39,7 +40,7 @@ from labeling_sft.configs import QLoRAConfig
 from labeling_sft.dataset_builders import BuildFromFileDatasetBuilder, SqliteLocalBuilder
 from labeling_sft.dataset_loaders import LocalJsonlDatasetLoader
 from labeling_sft.evaluators import QwenEvaluator
-from labeling_sft.exporters import GGUFExporter, MergeExporter
+from labeling_sft.exporters import GGUFExporter
 from labeling_sft.trainers import QLoRATrainer
 
 __all__ = [
@@ -58,6 +59,7 @@ __all__ = [
     "TrainingResult",
     # ABCs
     "BaseConfig",
+    "BaseArtifactStore",
     "BaseDatasetBuilder",
     "BaseDatasetLoader",
     "BaseEvaluator",
@@ -69,7 +71,6 @@ __all__ = [
     "BuildFromFileDatasetBuilder",
     "LocalJsonlDatasetLoader",
     "QLoRATrainer",
-    "MergeExporter",
     "GGUFExporter",
     "QwenEvaluator",
 ]

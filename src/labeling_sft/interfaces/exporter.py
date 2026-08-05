@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from labeling_sft.contracts import ExportResult
+from labeling_sft.contracts import ArtifactLocation, ExportResult, TrainingResult
 
 
 class BaseExporter(ABC):
@@ -14,7 +14,6 @@ class BaseExporter(ABC):
     they share no implementation, only the contract.
 
     Concrete implementations:
-        - :class:`~labeling_sft.exporters.merge.MergeExporter` (format ``"merged_hf"``)
         - :class:`~labeling_sft.exporters.gguf.GGUFExporter` (format ``"gguf_q8_0"``)
         - Future: ``VLLMExporter``, ``OllamaExporter``, ...
     """
@@ -22,24 +21,22 @@ class BaseExporter(ABC):
     @abstractmethod
     def export(
         self,
-        adapter_dir: str,
-        output_dir: str,
-        base_model_id: str | None = None,
+        training: TrainingResult,
+        target: ArtifactLocation,
         **kwargs,
     ) -> ExportResult:
         """Execute model export.
 
         Args:
-            adapter_dir:   Trained adapter / checkpoint directory.
-            output_dir:    Export target directory.
-            base_model_id: Base model HuggingFace ID (``None`` = auto-detect).
+            training: Trained model artifacts and base model identity.
+            target: Export target location.
             **kwargs:      Exporter-specific options.
 
         Returns:
             :class:`~labeling_sft.interfaces.contracts.ExportResult`.
 
         Raises:
-            FileNotFoundError: ``adapter_dir`` does not exist.
+            FileNotFoundError: A required artifact does not exist.
         """
         ...
 
@@ -48,7 +45,7 @@ class BaseExporter(ABC):
     def format_name(self) -> str:
         """Format identifier for this exporter.
 
-        Examples: ``"merged_hf"``, ``"gguf_q8_0"``, ``"vllm_bf16"``.
+        Examples: ``"gguf_q8_0"``, ``"vllm_bf16"``.
         Used by CLI and auto-discovery registries.
         """
         ...

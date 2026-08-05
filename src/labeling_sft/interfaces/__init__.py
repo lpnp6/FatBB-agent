@@ -20,6 +20,7 @@ from labeling_sft.contracts import (
     TrainingResult,
 )
 from labeling_sft.interfaces.config import BaseConfig
+from labeling_sft.interfaces.artifact_store import BaseArtifactStore
 from labeling_sft.interfaces.dataset_builder import BaseDatasetBuilder
 from labeling_sft.interfaces.dataset_loader import BaseDatasetLoader
 from labeling_sft.interfaces.evaluator import BaseEvaluator
@@ -42,6 +43,7 @@ __all__ = [
     "TrainingResult",
     # ABCs
     "BaseConfig",
+    "BaseArtifactStore",
     "BaseDatasetBuilder",
     "BaseDatasetLoader",
     "BaseEvaluator",

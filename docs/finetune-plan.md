@@ -188,6 +188,8 @@ class QLoRAConfig:
 
 **Auto-resume** — before creating `TrainingArguments`, scans `output_dir/checkpoint-*` and picks the latest. If found, passes `resume_from_checkpoint` to Trainer. Re-running the same command after Ctrl+C continues from the last saved step, restoring model weights, optimizer momentum, LR scheduler position, and RNG state.
 
+**GGUF converter** — `GGUFExporter` takes `TrainingResult`, materializes its adapter, and merges it with the base model in a temporary directory before conversion. It manages llama.cpp's converter under `~/.fatbb/tools/llama.cpp/`; on its first use it shallow-clones the official repository and then runs `convert_hf_to_gguf.py`. The final GGUF is published through the artifact-store boundary (currently local paths).
+
 **GPU Memory Management** — three strategies work together to keep Qwen2.5-3B + LoRA within 8 GB VRAM:
 
 | Layer | Setting | What it does | Why it matters |

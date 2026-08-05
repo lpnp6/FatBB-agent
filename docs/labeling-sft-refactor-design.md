@@ -49,9 +49,10 @@ src/labeling_sft/
 │   └── qlora.py                      #   QLoRATrainer(BaseTrainer)
 │
 ├── exporters/                        # Exporter 实现族
-│   ├── __init__.py                   #   re-export MergeExporter, GGUFExporter
-│   ├── merge.py                      #   MergeExporter(BaseExporter)
+│   ├── __init__.py                   #   re-export GGUFExporter
 │   └── gguf.py                       #   GGUFExporter(BaseExporter)
+├── artifact_store/                   # ArtifactStore 实现族
+│   └── local.py                      #   LocalArtifactStore(BaseArtifactStore)
 │
 ├── evaluators/                       # Evaluator 实现族
 │   ├── __init__.py                   #   re-export QwenEvaluator
@@ -176,8 +177,8 @@ class ComparisonReport:
 @dataclass
 class ExportResult:
     """Exporter.export() 的返回值。"""
-    output_path: str             # 导出文件/目录绝对路径
-    format: str                  # "merged_hf" | "gguf" | "vllm" | ...
+    artifact: ArtifactLocation   # 导出产物位置
+    format: str                  # "gguf" | "vllm" | ...
     size_mb: float               # 产物总大小
     base_model_id: str           # 使用的基座模型 ID
 ```
@@ -460,15 +461,14 @@ class BaseExporter(ABC):
     def format_name(self) -> str:
         """该 Exporter 产出的格式标识符。
 
-        如 "merged_hf", "gguf_q8_0", "vllm_bf16" 等。
+        如 "gguf_q8_0", "vllm_bf16" 等。
         供 CLI 和注册表自动发现。
         """
         ...
 ```
 
-**现有代码映射**：
-- `export.py` 的 `merge_and_save()` → `MergeExporter(format_name="merged_hf")`
-- `export.py` 的 `convert_to_gguf()` → `GGUFExporter(format_name="gguf_q8_0")`
+`GGUFExporter` 是唯一的导出路径：它接收 `TrainingResult` 与目标
+`ArtifactLocation`，并返回含产物位置的 `ExportResult`。
 
 ### 4.5 `BaseEvaluator` — `interfaces/evaluator.py`
 
@@ -624,20 +624,17 @@ trainers/
 
 ```
 exporters/
-├── __init__.py    # from .merge import MergeExporter; from .gguf import GGUFExporter
-├── merge.py       # MergeExporter(BaseExporter) — format_name="merged_hf"
-└── gguf.py        # GGUFExporter(BaseExporter)  — format_name="gguf_q8_0"
+├── __init__.py       # from .gguf import GGUFExporter
+└── gguf.py           # GGUFExporter(BaseExporter) — format_name="gguf_q8_0"
 ```
 
-**`MergeExporter`**：
-- `export()` 封装现有 `merge_and_save()`
-- `format_name` → `"merged_hf"`
-- 加载 bf16 基座模型 → attach adapter → `merge_and_unload()` → `save_pretrained()`
+`BaseArtifactStore` 位于 `interfaces/artifact_store.py`；本地实现位于
+`artifact_store/local.py`。
 
 **`GGUFExporter`**：
-- `export()` 封装现有 `convert_to_gguf()`
 - `format_name` → `"gguf_q8_0"`
-- 先调用 `MergeExporter`（或直接接收 merged 目录），再调用 `convert_hf_to_gguf.py`
+- 接收 `TrainingResult`，在临时目录中加载基座模型与 adapter，执行 `merge_and_unload()`，再调用 `convert_hf_to_gguf.py`
+- 通过 `ArtifactStore` 物化输入并发布最终 GGUF；当前实现本地存储，其他后端按需添加
 
 **未来扩展**：
 - `exporters/vllm.py` → `VLLMExporter`：直接输出 vLLM 可加载的格式
@@ -690,7 +687,7 @@ from labeling_sft.interfaces import (
 from labeling_sft.configs import QLoRAConfig
 from labeling_sft.dataset_builders import BootstrapDatasetBuilder
 from labeling_sft.trainers import QLoRATrainer
-from labeling_sft.exporters import MergeExporter, GGUFExporter
+from labeling_sft.exporters import GGUFExporter
 from labeling_sft.evaluators import QwenEvaluator
 ```
 
@@ -784,7 +781,7 @@ result = trainer.train("data/train.jsonl", "data/val.jsonl")
 | **Phase 2** | 创建 `configs/qlora.py`，让 `QLoRAConfig` 继承 `BaseConfig`。原 `training_config.py` 改为 thin re-export wrapper。 | 低风险 |
 | **Phase 3** | 创建 `dataset_builders/bootstrap.py`，将 `build_dataset()` 封装为 `BootstrapDatasetBuilder`。 | 低风险 |
 | **Phase 4** | 创建 `trainers/qlora.py`，将 `run_training()` 拆分为 `QLoRATrainer`。 | 中风险 — 训练逻辑核心 |
-| **Phase 5** | 创建 `exporters/merge.py` + `exporters/gguf.py`。 | 低风险 |
+| **Phase 5** | 创建 `exporters/gguf.py`，由其内部完成 adapter 合并与转换。 | 低风险 |
 | **Phase 6** | 创建 `evaluators/qwen.py`，将 `evaluate()` + `evaluate_with_comparison()` 封装为 `QwenEvaluator`。 | 低风险 |
 | **Phase 7** | 更新顶层 `__init__.py`，统一 re-export。删除旧 flat 文件（或保留为 thin wrapper 一个版本）。 | 一次性切换 |
 
