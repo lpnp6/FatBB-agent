@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from labeling_sft.contracts import ArtifactLocation, DataLocation, DatasetSplit, TrainingResult
 from labeling_sft.evaluators.qwen import (
     QwenEvaluator,
     _check_enum_values,
@@ -25,6 +26,22 @@ __all__ = [
     "evaluate",
     "evaluate_with_comparison",
 ]
+
+
+def _legacy_contracts(
+    adapter_dir: str, val_file: str, base_model_id: str
+) -> tuple[TrainingResult, DatasetSplit]:
+    """Adapt deprecated path-based arguments to the current contracts."""
+    training = TrainingResult(
+        model=ArtifactLocation.local(adapter_dir),
+        adapter=ArtifactLocation.local(adapter_dir),
+        base_model_id=base_model_id,
+    )
+    dataset = DatasetSplit(
+        train=DataLocation.local(val_file, format="jsonl"),
+        val=DataLocation.local(val_file, format="jsonl"),
+    )
+    return training, dataset
 
 
 def evaluate(
@@ -43,15 +60,15 @@ def evaluate(
         :class:`~labeling_sft.interfaces.contracts.EvalReport`.
     """
     evaluator = QwenEvaluator(base_model_id=base_model_id)
+    training, dataset = _legacy_contracts(adapter_dir, val_file, base_model_id)
     report = evaluator.evaluate(
-        adapter_dir=adapter_dir,
-        val_path=val_file,
-        base_model_id=base_model_id,
-        output_report=output_report,
+        training=training,
+        dataset=dataset,
+        report_target=ArtifactLocation.local(output_report) if output_report else None,
         max_samples=max_samples,
         local_files_only=local_files_only,
     )
-    return report.raw_metrics
+    return report.metrics
 
 
 def evaluate_with_comparison(
@@ -71,20 +88,20 @@ def evaluate_with_comparison(
         :class:`~labeling_sft.interfaces.contracts.ComparisonReport`.
     """
     evaluator = QwenEvaluator(base_model_id=base_model_id)
+    training, dataset = _legacy_contracts(adapter_dir, val_file, base_model_id)
     report = evaluator.compare(
-        adapter_dir=adapter_dir,
-        val_path=val_file,
-        base_model_id=base_model_id,
-        output_report=output_report,
+        training=training,
+        dataset=dataset,
+        report_target=ArtifactLocation.local(output_report) if output_report else None,
         diff_examples=diff_examples,
         max_samples=max_samples,
         local_files_only=local_files_only,
     )
     return {
         "base_model_id": report.base_model_id,
-        "adapter_dir": report.adapter_dir,
-        "base": report.base.raw_metrics,
-        "fine_tuned": report.fine_tuned.raw_metrics,
+        "adapter": report.adapter.value,
+        "base": report.base.metrics,
+        "fine_tuned": report.fine_tuned.metrics,
     }
 
 

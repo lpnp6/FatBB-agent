@@ -14,6 +14,8 @@ Package structure::
 from labeling_sft.interfaces import (
     # Contracts
     ComparisonReport,
+    ArtifactLocation,
+    ArtifactLocationType,
     DataLocation,
     DataLocationType,
     DatasetBuildRequest,
@@ -41,6 +43,8 @@ from labeling_sft.trainers import QLoRATrainer
 __all__ = [
     # Contracts
     "ComparisonReport",
+    "ArtifactLocation",
+    "ArtifactLocationType",
     "DataLocation",
     "DataLocationType",
     "DatasetBuildRequest",

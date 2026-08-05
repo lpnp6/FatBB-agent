@@ -36,7 +36,16 @@ from pathlib import Path
 from typing import Any
 
 from labeling.utils.validator import OutputValidator, OutputValidationError
-from labeling_sft.contracts import ComparisonReport, EvalReport
+from labeling_sft.contracts import (
+    ArtifactLocation,
+    ArtifactLocationType,
+    ComparisonReport,
+    DataLocation,
+    DataLocationType,
+    DatasetSplit,
+    EvalReport,
+    TrainingResult,
+)
 from labeling_sft.interfaces.evaluator import BaseEvaluator
 from labeling_sft.trainers.qlora import format_example, load_system_prompt
 
@@ -195,8 +204,8 @@ class QwenEvaluator(BaseEvaluator):
 
     def load_model(
         self,
-        adapter_dir: str | None,
-        base_model_id: str,
+        training: TrainingResult,
+        include_adapter: bool = True,
         local_files_only: bool = False,
         **kwargs,
     ) -> tuple[Any, Any]:
@@ -213,43 +222,42 @@ class QwenEvaluator(BaseEvaluator):
             bnb_4bit_use_double_quant=True,
         )
 
-        logger.info("Loading base model: %s", base_model_id)
+        logger.info("Loading base model: %s", training.base_model_id)
         tokenizer = AutoTokenizer.from_pretrained(
-            base_model_id, trust_remote_code=True, local_files_only=local_files_only,
+            training.base_model_id, trust_remote_code=True, local_files_only=local_files_only,
         )
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
         model = AutoModelForCausalLM.from_pretrained(
-            base_model_id,
+            training.base_model_id,
             quantization_config=bnb_config,
             device_map="auto",
             trust_remote_code=True,
             local_files_only=local_files_only,
         )
 
-        if adapter_dir is not None:
-            logger.info("Loading LoRA adapter: %s", adapter_dir)
-            model = PeftModel.from_pretrained(model, adapter_dir)
+        if include_adapter:
+            adapter_path = self._local_artifact_path(training.adapter, "adapter")
+            logger.info("Loading LoRA adapter: %s", adapter_path)
+            model = PeftModel.from_pretrained(model, adapter_path)
 
         model.eval()
         return model, tokenizer
 
     def evaluate(
         self,
-        adapter_dir: str | None,
-        val_path: str,
-        base_model_id: str = "",
-        output_report: str | None = None,
+        training: TrainingResult,
+        dataset: DatasetSplit,
+        report_target: ArtifactLocation | None = None,
         max_samples: int | None = None,
         local_files_only: bool = False,
         **kwargs,
     ) -> EvalReport:
         """Evaluate a single model on the validation set."""
-        base = base_model_id or self._default_base
-        val_path_obj = Path(val_path)
+        val_path_obj = self._local_data_path(dataset.val, "validation split")
         if not val_path_obj.exists():
-            raise FileNotFoundError(f"Validation file not found: {val_path}")
+            raise FileNotFoundError(f"Validation file not found: {dataset.val.value}")
 
         with val_path_obj.open("r", encoding="utf-8") as fh:
             gold_records = [json.loads(line) for line in fh if line.strip()]
@@ -262,48 +270,35 @@ class QwenEvaluator(BaseEvaluator):
 
         system_prompt = load_system_prompt()
         model, tokenizer = self.load_model(
-            adapter_dir, base, local_files_only=local_files_only,
+            training, local_files_only=local_files_only,
         )
 
         metrics = self._run_eval_pass(model, tokenizer, gold_records, system_prompt)
 
         report = EvalReport(
-            model_label="Fine-tuned" if adapter_dir else "Base",
+            model_label="Fine-tuned",
             total_examples=metrics["total_examples"],
-            json_valid=metrics["json_valid"],
-            json_validity_pct=metrics["json_validity_pct"],
-            validator_pass=metrics["validator_pass"],
-            validator_pass_pct=metrics["validator_pass_pct"],
-            enum_valid_fields=metrics["enum_valid_fields"],
-            enum_total_fields=metrics["enum_total_fields"],
-            enum_accuracy_pct=metrics["enum_accuracy_pct"],
-            not_a_recipe_correct=metrics["not_a_recipe_correct"],
-            not_a_recipe_total=metrics["not_a_recipe_total"],
-            not_a_recipe_accuracy_pct=metrics["not_a_recipe_accuracy_pct"],
-            field_coverage=metrics["field_coverage"],
-            validator_errors=metrics["validator_errors"],
-            raw_metrics=metrics,
+            metrics=metrics,
         )
 
         self._print_metrics(metrics, report.model_label)
 
-        if output_report:
-            report_path = Path(output_report)
+        if report_target:
+            report_path = self._local_artifact_path(report_target, "report_target")
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(
                 json.dumps(metrics, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
-            print(f"\n  Report saved to {output_report}")
+            print(f"\n  Report saved to {report_path}")
 
         return report
 
     def compare(
         self,
-        adapter_dir: str,
-        val_path: str,
-        base_model_id: str = "",
-        output_report: str | None = None,
+        training: TrainingResult,
+        dataset: DatasetSplit,
+        report_target: ArtifactLocation | None = None,
         diff_examples: int = 5,
         max_samples: int | None = None,
         local_files_only: bool = False,
@@ -312,10 +307,9 @@ class QwenEvaluator(BaseEvaluator):
         """Compare base model vs fine-tuned model."""
         import torch
 
-        base = base_model_id or self._default_base
-        val_path_obj = Path(val_path)
+        val_path_obj = self._local_data_path(dataset.val, "validation split")
         if not val_path_obj.exists():
-            raise FileNotFoundError(f"Validation file not found: {val_path}")
+            raise FileNotFoundError(f"Validation file not found: {dataset.val.value}")
 
         with val_path_obj.open("r", encoding="utf-8") as fh:
             gold_records = [json.loads(line) for line in fh if line.strip()]
@@ -333,7 +327,7 @@ class QwenEvaluator(BaseEvaluator):
         print("  Phase 1/2: Evaluating base model (no adapter)")
         print(f"{'=' * 60}")
         base_model, tokenizer = self.load_model(
-            None, base, local_files_only=local_files_only,
+            training, include_adapter=False, local_files_only=local_files_only,
         )
         base_metrics = self._run_eval_pass(
             base_model, tokenizer, gold_records, system_prompt,
@@ -348,7 +342,7 @@ class QwenEvaluator(BaseEvaluator):
         print("  Phase 2/2: Evaluating fine-tuned model")
         print(f"{'=' * 60}")
         ft_model, _ = self.load_model(
-            adapter_dir, base, local_files_only=local_files_only,
+            training, local_files_only=local_files_only,
         )
         ft_metrics = self._run_eval_pass(
             ft_model, tokenizer, gold_records, system_prompt,
@@ -359,36 +353,12 @@ class QwenEvaluator(BaseEvaluator):
         base_report = EvalReport(
             model_label="Base (no adapter)",
             total_examples=base_metrics["total_examples"],
-            json_valid=base_metrics["json_valid"],
-            json_validity_pct=base_metrics["json_validity_pct"],
-            validator_pass=base_metrics["validator_pass"],
-            validator_pass_pct=base_metrics["validator_pass_pct"],
-            enum_valid_fields=base_metrics["enum_valid_fields"],
-            enum_total_fields=base_metrics["enum_total_fields"],
-            enum_accuracy_pct=base_metrics["enum_accuracy_pct"],
-            not_a_recipe_correct=base_metrics["not_a_recipe_correct"],
-            not_a_recipe_total=base_metrics["not_a_recipe_total"],
-            not_a_recipe_accuracy_pct=base_metrics["not_a_recipe_accuracy_pct"],
-            field_coverage=base_metrics["field_coverage"],
-            validator_errors=base_metrics["validator_errors"],
-            raw_metrics=base_metrics,
+            metrics=base_metrics,
         )
         ft_report = EvalReport(
             model_label="Fine-tuned",
             total_examples=ft_metrics["total_examples"],
-            json_valid=ft_metrics["json_valid"],
-            json_validity_pct=ft_metrics["json_validity_pct"],
-            validator_pass=ft_metrics["validator_pass"],
-            validator_pass_pct=ft_metrics["validator_pass_pct"],
-            enum_valid_fields=ft_metrics["enum_valid_fields"],
-            enum_total_fields=ft_metrics["enum_total_fields"],
-            enum_accuracy_pct=ft_metrics["enum_accuracy_pct"],
-            not_a_recipe_correct=ft_metrics["not_a_recipe_correct"],
-            not_a_recipe_total=ft_metrics["not_a_recipe_total"],
-            not_a_recipe_accuracy_pct=ft_metrics["not_a_recipe_accuracy_pct"],
-            field_coverage=ft_metrics["field_coverage"],
-            validator_errors=ft_metrics["validator_errors"],
-            raw_metrics=ft_metrics,
+            metrics=ft_metrics,
         )
 
         # ── Print comparison ────────────────────────────────────────────
@@ -411,30 +381,48 @@ class QwenEvaluator(BaseEvaluator):
             self._print_example_diffs(base_preds, ft_preds, diff_examples)
 
         # ── Write report ────────────────────────────────────────────────
-        if output_report:
+        if report_target:
             comparison = {
-                "base_model_id": base,
-                "adapter_dir": adapter_dir,
+                "base_model_id": training.base_model_id,
+                "adapter": training.adapter.value,
                 "base": {k: v for k, v in base_metrics.items() if k != "predictions"},
                 "fine_tuned": {k: v for k, v in ft_metrics.items() if k != "predictions"},
             }
-            report_path = Path(output_report)
+            report_path = self._local_artifact_path(report_target, "report_target")
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(
                 json.dumps(comparison, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
-            print(f"\n  Comparison report saved to {output_report}")
+            print(f"\n  Comparison report saved to {report_path}")
 
         return ComparisonReport(
-            base_model_id=base,
-            adapter_dir=adapter_dir,
+            base_model_id=training.base_model_id,
+            adapter=training.adapter,
             base=base_report,
             fine_tuned=ft_report,
             divergent_examples=divergent,
         )
 
     # ── Core eval pass ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _local_data_path(location: DataLocation, name: str) -> Path:
+        if location.type is not DataLocationType.LOCAL_PATH:
+            raise NotImplementedError(
+                f"QwenEvaluator only supports local JSONL; "
+                f"{name} uses {location.type.value}"
+            )
+        return Path(location.value)
+
+    @staticmethod
+    def _local_artifact_path(location: ArtifactLocation, name: str) -> Path:
+        if location.type is not ArtifactLocationType.LOCAL_PATH:
+            raise NotImplementedError(
+                f"QwenEvaluator only supports local artifacts; "
+                f"{name} uses {location.type.value}"
+            )
+        return Path(location.value)
 
     @staticmethod
     def _run_eval_pass(
@@ -770,23 +758,30 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     evaluator = QwenEvaluator(base_model_id=args.base_model_id)
+    training = TrainingResult(
+        model=ArtifactLocation.local(args.adapter_dir),
+        adapter=ArtifactLocation.local(args.adapter_dir),
+        base_model_id=args.base_model_id,
+    )
+    dataset = DatasetSplit(
+        train=DataLocation.local(args.val_file, format="jsonl"),
+        val=DataLocation.local(args.val_file, format="jsonl"),
+    )
 
     if args.compare_base:
         evaluator.compare(
-            adapter_dir=args.adapter_dir,
-            val_path=args.val_file,
-            base_model_id=args.base_model_id,
-            output_report="data/training/eval_comparison.json",
+            training=training,
+            dataset=dataset,
+            report_target=ArtifactLocation.local("data/training/eval_comparison.json"),
             diff_examples=args.diff_examples,
             local_files_only=args.local_files_only,
             max_samples=args.max_samples,
         )
     else:
         evaluator.evaluate(
-            adapter_dir=args.adapter_dir,
-            val_path=args.val_file,
-            base_model_id=args.base_model_id,
-            output_report=args.output_report,
+            training=training,
+            dataset=dataset,
+            report_target=ArtifactLocation.local(args.output_report),
             local_files_only=args.local_files_only,
             max_samples=args.max_samples,
         )

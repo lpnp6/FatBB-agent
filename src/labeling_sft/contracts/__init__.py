@@ -15,7 +15,11 @@ from labeling_sft.contracts.dataset import (
 )
 from labeling_sft.contracts.evaluation import ComparisonReport, EvalReport
 from labeling_sft.contracts.export import ExportResult
-from labeling_sft.contracts.training import TrainingResult
+from labeling_sft.contracts.training import (
+    ArtifactLocation,
+    ArtifactLocationType,
+    TrainingResult,
+)
 
 __all__ = [
     # Dataset
@@ -26,6 +30,8 @@ __all__ = [
     "DatasetSplit",
     "DatasetStats",
     # Training
+    "ArtifactLocation",
+    "ArtifactLocationType",
     "TrainingResult",
     # Evaluation
     "EvalReport",

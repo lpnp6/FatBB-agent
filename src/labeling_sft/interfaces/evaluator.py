@@ -5,7 +5,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from labeling_sft.contracts import ComparisonReport, EvalReport
+from labeling_sft.contracts import (
+    ArtifactLocation,
+    ComparisonReport,
+    DatasetSplit,
+    EvalReport,
+    TrainingResult,
+)
 
 
 class BaseEvaluator(ABC):
@@ -24,16 +30,15 @@ class BaseEvaluator(ABC):
     @abstractmethod
     def load_model(
         self,
-        adapter_dir: str | None,
-        base_model_id: str,
+        training: TrainingResult,
+        include_adapter: bool = True,
         **kwargs,
     ) -> tuple[Any, Any]:
         """Load model and tokenizer.
 
         Args:
-            adapter_dir:  LoRA adapter path. ``None`` = load base model only
-                          (used for comparison mode).
-            base_model_id: HuggingFace model ID.
+            training: Model artifacts and base model identity from training.
+            include_adapter: Whether to apply the fine-tuned adapter.
 
         Returns:
             ``(model, tokenizer)``
@@ -43,20 +48,18 @@ class BaseEvaluator(ABC):
     @abstractmethod
     def evaluate(
         self,
-        adapter_dir: str | None,
-        val_path: str,
-        base_model_id: str,
-        output_report: str | None = None,
+        training: TrainingResult,
+        dataset: DatasetSplit,
+        report_target: ArtifactLocation | None = None,
         max_samples: int | None = None,
         **kwargs,
     ) -> EvalReport:
         """Evaluate a single model.
 
         Args:
-            adapter_dir:   Adapter path (``None`` = base model only).
-            val_path:      Path to ``val.jsonl``.
-            base_model_id: Base model HuggingFace ID.
-            output_report: Where to write the report JSON (``None`` = skip).
+            training:      Model artifacts produced by a trainer.
+            dataset:       Validation split produced by a dataset builder.
+            report_target: Where to write the report JSON (``None`` = skip).
             max_samples:   Limit to first N samples (``None`` = all).
 
         Returns:
@@ -67,10 +70,9 @@ class BaseEvaluator(ABC):
     @abstractmethod
     def compare(
         self,
-        adapter_dir: str,
-        val_path: str,
-        base_model_id: str,
-        output_report: str | None = None,
+        training: TrainingResult,
+        dataset: DatasetSplit,
+        report_target: ArtifactLocation | None = None,
         diff_examples: int = 5,
         max_samples: int | None = None,
         **kwargs,

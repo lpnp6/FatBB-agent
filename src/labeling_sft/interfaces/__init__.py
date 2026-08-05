@@ -7,6 +7,8 @@ in the sibling sub-packages (``configs/``, ``trainers/``, etc.).
 
 from labeling_sft.contracts import (
     ComparisonReport,
+    ArtifactLocation,
+    ArtifactLocationType,
     DataLocation,
     DataLocationType,
     DatasetBuildRequest,
@@ -26,6 +28,8 @@ from labeling_sft.interfaces.trainer import BaseTrainer
 __all__ = [
     # Contracts
     "ComparisonReport",
+    "ArtifactLocation",
+    "ArtifactLocationType",
     "DataLocation",
     "DataLocationType",
     "DatasetBuildRequest",
