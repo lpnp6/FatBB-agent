@@ -168,7 +168,7 @@ class QLoRATrainer(BaseTrainer):
         if not dataset_loader:
             raise ValueError("dataset_loader is required")
         self._dataset_loader = dataset_loader
-        self._configure_logging(config.project_name)
+        self._configure_logging(config.project_dir)
 
     # ── BaseTrainer implementation ──────────────────────────────────────
 
@@ -318,8 +318,8 @@ class QLoRATrainer(BaseTrainer):
     # ── Internal helpers ────────────────────────────────────────────────
 
     @staticmethod
-    def _configure_logging(project_name: str) -> None:
-        log_path = Path.home() / ".fatbb" / project_name / "train.log"
+    def _configure_logging(project_dir: Path) -> None:
+        log_path = project_dir / "train.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         if any(getattr(handler, "_fatbb_log_path", None) == str(log_path) for handler in logger.handlers):
             return

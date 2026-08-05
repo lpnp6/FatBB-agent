@@ -91,15 +91,15 @@ class DatasetStats:
 class DatasetBuildRequest:
     """Input contract for a dataset build operation.
 
-    ``source`` describes the labeled input. Builders persist Alpaca output in
-    ``~/.fatbb/<project_name>/Alpaca``. A concrete builder declares which
-    :class:`DataLocationType` values it supports.
+    ``source`` describes the labeled input. When set, ``work_dir`` determines
+    where builders write ``Alpaca`` output.
     """
 
     source: DataLocation
     project_name: str
     val_split: float = 0.15
     seed: int = 42
+    work_dir: str | None = None
 
     def __post_init__(self) -> None:
         if (

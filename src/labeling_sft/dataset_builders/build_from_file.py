@@ -42,7 +42,7 @@ class BuildFromFileDatasetBuilder(BaseDatasetBuilder):
         random.Random(request.seed).shuffle(records)
         val_count = int(len(records) * request.val_split)
         val, train = records[:val_count], records[val_count:]
-        train_path, val_path = self._output_paths(request.project_name)
+        train_path, val_path = self._output_paths(request.project_name, request.work_dir)
         self._write(train_path, train)
         self._write(val_path, val)
 
@@ -73,8 +73,8 @@ class BuildFromFileDatasetBuilder(BaseDatasetBuilder):
                 file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     @staticmethod
-    def _output_paths(project_name: str) -> tuple[Path, Path]:
-        output_dir = Path.home() / ".fatbb" / project_name / "Alpaca"
+    def _output_paths(project_name: str, work_dir: str | None) -> tuple[Path, Path]:
+        output_dir = (Path(work_dir).expanduser() if work_dir else Path.home() / ".fatbb" / project_name) / "Alpaca"
         return output_dir / "train.jsonl", output_dir / "val.jsonl"
 
     @staticmethod

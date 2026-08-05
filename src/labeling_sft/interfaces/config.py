@@ -25,6 +25,9 @@ class BaseConfig(ABC):
     seed: int
     """Random seed for reproducibility."""
 
+    work_dir: str
+    """Directory used for all pipeline artifacts."""
+
     # ── Serialization ────────────────────────────────────────────────────
 
     @abstractmethod

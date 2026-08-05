@@ -32,10 +32,13 @@ class QLoRAConfig(BaseConfig):
     """Hugging Face model id or local path."""
 
     project_name: str = ""
-    """Project name; training logs are written under ``~/.fatbb/<project_name>``."""
+    """Project name used for legacy artifact locations and log labels."""
 
     system_prompt_path: str = ""
     """Path to the system prompt text file."""
+
+    work_dir: str = ""
+    """Directory for datasets, checkpoints, logs, and model artifacts."""
 
     # ── LoRA ─────────────────────────────────────────────────────────────
     lora_r: int = 16
@@ -120,7 +123,7 @@ class QLoRAConfig(BaseConfig):
     """Random seed for reproducibility."""
 
     dataset_cache: bool = True
-    """Persist tokenized datasets to ``~/.fatbb/<project_name>/cache/``.
+    """Persist tokenized datasets to ``project_dir/cache/``.
     Re-loading skips CPU tokenisation on restart."""
 
     resume_from_checkpoint: str | None = None
@@ -189,7 +192,7 @@ class QLoRAConfig(BaseConfig):
     @property
     def project_dir(self) -> Path:
         """Root directory for this project's training artifacts."""
-        return Path.home() / ".fatbb" / self.project_name
+        return Path(self.work_dir).expanduser() if self.work_dir else Path.home() / ".fatbb" / self.project_name
 
     # ── Backward-compat aliases for train.py ─────────────────────────────
 
