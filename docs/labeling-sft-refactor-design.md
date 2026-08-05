@@ -398,16 +398,16 @@ class BaseTrainer(ABC):
     @abstractmethod
     def train(
         self,
-        train_path: str,
-        val_path: str,
+        split: DatasetSplit,
+        artifact_target: ArtifactLocation,
     ) -> TrainingResult:
         """执行完整训练流程。
 
         默认实现：load_data() → load_model() → 训练循环 → 保存。
 
         Args:
-            train_path: train.jsonl 路径。
-            val_path:   val.jsonl 路径。
+            split: 由 DatasetBuilder 产生的数据集位置。
+            artifact_target: 训练产物的目标位置。
 
         Returns:
             TrainingResult。

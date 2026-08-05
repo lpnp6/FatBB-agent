@@ -15,7 +15,7 @@ class BaseArtifactStore(ABC):
 
     @abstractmethod
     def publish(self, source: Path, target: ArtifactLocation) -> ArtifactLocation:
-        """Publish a local file to *target*."""
+        """Publish a local file or directory to *target*."""
 
     @abstractmethod
     def size_bytes(self, artifact: ArtifactLocation) -> int:

@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import logging
+
 # Re-export key symbols so existing imports don't break
 from labeling_sft.trainers.qlora import (
     QLoRATrainer,
@@ -17,7 +19,7 @@ from labeling_sft.trainers.qlora import (
     load_system_prompt,
 )
 from labeling_sft.configs.qlora import QLoRAConfig
-from labeling_sft.contracts import DataLocation, DatasetSplit
+from labeling_sft.contracts import ArtifactLocation, DataLocation, DatasetSplit, TrainingResult
 
 __all__ = [
     "QLoRATrainer",
@@ -33,7 +35,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def run_training(config: QLoRAConfig) -> None:
+def run_training(config: QLoRAConfig) -> TrainingResult:
     """Execute the full QLoRA training pipeline.
 
     .. deprecated::
@@ -41,8 +43,7 @@ def run_training(config: QLoRAConfig) -> None:
         :class:`~labeling_sft.interfaces.contracts.TrainingResult`.
     """
     trainer = QLoRATrainer(config)
-    trainer.train(DatasetSplit(
+    return trainer.train(DatasetSplit(
         train=DataLocation.local(str(config.project_dir / "Alpaca" / "train.jsonl"), format="jsonl"),
         val=DataLocation.local(str(config.project_dir / "Alpaca" / "val.jsonl"), format="jsonl"),
-    ))
-
+    ), ArtifactLocation.local(str(config.project_dir)))

@@ -8,6 +8,7 @@ from typing import Any
 
 from labeling_sft.configs.qlora import QLoRAConfig
 from labeling_sft.contracts import ArtifactLocation, DatasetRecord, DatasetSplit, TrainingResult
+from labeling_sft.artifact_store import artifact_store
 from labeling_sft.dataset_loaders import LocalJsonlDatasetLoader
 from labeling_sft.interfaces.dataset_loader import BaseDatasetLoader
 from labeling_sft.interfaces.trainer import BaseTrainer
@@ -154,7 +155,7 @@ class QLoRATrainer(BaseTrainer):
     def __init__(
         self,
         config: QLoRAConfig,
-        dataset_loader: BaseDatasetLoader,
+        dataset_loader: BaseDatasetLoader | None = None,
     ) -> None:
         super().__init__(config)
         if (
@@ -164,6 +165,8 @@ class QLoRATrainer(BaseTrainer):
             or not config.system_prompt_path
         ):
             raise ValueError("project_name and system_prompt_path are required")
+        if not dataset_loader:
+            raise ValueError("dataset_loader is required")
         self._dataset_loader = dataset_loader
         self._configure_logging(config.project_name)
 
@@ -192,6 +195,7 @@ class QLoRATrainer(BaseTrainer):
     def train(
         self,
         split: DatasetSplit,
+        artifact_target: ArtifactLocation,
     ) -> TrainingResult:
         """Execute the full QLoRA training pipeline."""
         import torch # pyright: ignore[reportMissingImports]
@@ -300,16 +304,15 @@ class QLoRATrainer(BaseTrainer):
         if hasattr(train_result, 'metrics') and 'eval_loss' in train_result.metrics:
             final_eval_loss = float(train_result.metrics['eval_loss'])
 
-        best_checkpoint = getattr(trainer.state, "best_model_checkpoint", None)
+        artifact = artifact_store(artifact_target).publish(
+            self.config.project_dir, artifact_target
+        )
         return TrainingResult(
-            model=ArtifactLocation.local(str(self.config.project_dir)),
-            adapter=ArtifactLocation.local(str(self.config.project_dir)),
+            model=artifact,
+            adapter=artifact,
             base_model_id=self.config.model_id,
             final_eval_loss=final_eval_loss,
             total_steps=getattr(train_result, 'global_step', 0),
-            best_checkpoint=(
-                ArtifactLocation.local(best_checkpoint) if best_checkpoint else None
-            ),
         )
 
     # ── Internal helpers ────────────────────────────────────────────────

@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from .config import BaseConfig
-from labeling_sft.contracts import DatasetSplit, TrainingResult
+from labeling_sft.contracts import ArtifactLocation, DatasetSplit, TrainingResult
 
 
 class BaseTrainer(ABC):
@@ -54,6 +54,7 @@ class BaseTrainer(ABC):
     def train(
         self,
         split: DatasetSplit,
+        artifact_target: ArtifactLocation,
     ) -> TrainingResult:
         """Execute the full training pipeline.
 
@@ -66,6 +67,7 @@ class BaseTrainer(ABC):
 
         Args:
             split: Locations and optional statistics produced by a dataset builder.
+            artifact_target: Destination for the trained model artifact.
 
         Returns:
             :class:`~labeling_sft.interfaces.contracts.TrainingResult`.
