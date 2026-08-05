@@ -39,10 +39,14 @@ class SqliteLocalBuilder(BaseDatasetBuilder):
         random.Random(request.seed).shuffle(records)
         val_count = int(len(records) * request.val_split)
         val, train = records[:val_count], records[val_count:]
-        self._write(self._local_path(request.train_target, "train_target"), train)
-        self._write(self._local_path(request.val_target, "val_target"), val)
+        train_path, val_path = self._output_paths(request.project_name)
+        self._write(train_path, train)
+        self._write(val_path, val)
 
-        return DatasetSplit(train=request.train_target, val=request.val_target)
+        return DatasetSplit(
+            train=DataLocation.local(str(train_path), format="jsonl"),
+            val=DataLocation.local(str(val_path), format="jsonl"),
+        )
 
     def _read(self, database_path: Path) -> list[dict[str, str]]:
         with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True) as database:
@@ -62,6 +66,11 @@ class SqliteLocalBuilder(BaseDatasetBuilder):
         with path.open("w", encoding="utf-8") as file:
             for record in records:
                 file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _output_paths(project_name: str) -> tuple[Path, Path]:
+        output_dir = Path.home() / ".fatbb" / project_name / "Alpaca"
+        return output_dir / "train.jsonl", output_dir / "val.jsonl"
 
     @staticmethod
     def _local_path(location: DataLocation, name: str) -> Path:

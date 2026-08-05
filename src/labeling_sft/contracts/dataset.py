@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 
@@ -90,17 +91,23 @@ class DatasetStats:
 class DatasetBuildRequest:
     """Input contract for a dataset build operation.
 
-    ``source`` describes the labeled input and the ``*_target`` fields
-    describe where the builder should persist its artifacts. A concrete
-    builder declares which :class:`DataLocationType` values it supports.
+    ``source`` describes the labeled input. Builders persist Alpaca output in
+    ``~/.fatbb/<project_name>/Alpaca``. A concrete builder declares which
+    :class:`DataLocationType` values it supports.
     """
 
     source: DataLocation
-    train_target: DataLocation
-    val_target: DataLocation
-    stats_target: DataLocation | None = None
+    project_name: str
     val_split: float = 0.15
     seed: int = 42
+
+    def __post_init__(self) -> None:
+        if (
+            not self.project_name
+            or self.project_name in {".", ".."}
+            or Path(self.project_name).name != self.project_name
+        ):
+            raise ValueError("project_name must be a single directory name")
 
 
 @dataclass

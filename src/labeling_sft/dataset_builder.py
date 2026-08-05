@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from labeling_sft.contracts import DataLocation, DatasetBuildRequest, DatasetSplit
 from labeling_sft.dataset_builders.build_from_file import BuildFromFileDatasetBuilder
 
@@ -19,8 +17,7 @@ __all__ = ["BuildFromFileDatasetBuilder", "build_dataset"]
 
 def build_dataset(
     input_dir: str,
-    train_path: str = "data/training/train.jsonl",
-    val_path: str = "data/training/val.jsonl",
+    project_name: str,
     val_split: float = 0.15,
     seed: int = 42,
 ) -> DatasetSplit:
@@ -33,8 +30,7 @@ def build_dataset(
     builder = BuildFromFileDatasetBuilder()
     split = builder.build(DatasetBuildRequest(
         source=DataLocation.local(input_dir, format="jsonl"),
-        train_target=DataLocation.local(train_path, format="jsonl"),
-        val_target=DataLocation.local(val_path, format="jsonl"),
+        project_name=project_name,
         val_split=val_split,
         seed=seed,
     ))
@@ -53,8 +49,8 @@ if __name__ == "__main__":
         help="Directory containing labeled JSONL files",
     )
     parser.add_argument(
-        "--output_dir", default="models/qwen2.5-3b-fatbb-v1",
-        help="Directory to write train.jsonl and val.jsonl",
+        "--project", required=True,
+        help="Project name; writes to ~/.fatbb/<project>/Alpaca",
     )
     parser.add_argument(
         "--val-split", type=float, default=0.15,
@@ -66,14 +62,10 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    out = Path(args.output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
     try:
         split = build_dataset(
             input_dir=args.input_dir,
-            train_path=str(out / "train.jsonl"),
-            val_path=str(out / "val.jsonl"),
+            project_name=args.project,
             val_split=args.val_split,
             seed=args.seed,
         )

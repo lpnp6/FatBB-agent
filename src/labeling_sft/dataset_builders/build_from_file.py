@@ -31,13 +31,7 @@ class BuildFromFileDatasetBuilder(BaseDatasetBuilder):
         if not 0 <= request.val_split < 1:
             raise ValueError("val_split must be in [0.0, 1.0)")
 
-        train_path = self._local_path(request.train_target, "train_target")
-        val_path = self._local_path(request.val_target, "val_target")
-        output_paths = {train_path.resolve(), val_path.resolve()}
-        source_files = [
-            path for path in sorted(source_dir.glob("*.jsonl"))
-            if path.resolve() not in output_paths
-        ]
+        source_files = sorted(source_dir.glob("*.jsonl"))
         if not source_files:
             raise FileNotFoundError(f"No JSONL files found in: {source_dir}")
 
@@ -48,10 +42,14 @@ class BuildFromFileDatasetBuilder(BaseDatasetBuilder):
         random.Random(request.seed).shuffle(records)
         val_count = int(len(records) * request.val_split)
         val, train = records[:val_count], records[val_count:]
+        train_path, val_path = self._output_paths(request.project_name)
         self._write(train_path, train)
         self._write(val_path, val)
 
-        return DatasetSplit(train=request.train_target, val=request.val_target)
+        return DatasetSplit(
+            train=DataLocation.local(str(train_path), format="jsonl"),
+            val=DataLocation.local(str(val_path), format="jsonl"),
+        )
 
     def _read(self, path: Path) -> list[dict[str, str]]:
         with path.open(encoding="utf-8") as file:
@@ -73,6 +71,11 @@ class BuildFromFileDatasetBuilder(BaseDatasetBuilder):
         with path.open("w", encoding="utf-8") as file:
             for record in records:
                 file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _output_paths(project_name: str) -> tuple[Path, Path]:
+        output_dir = Path.home() / ".fatbb" / project_name / "Alpaca"
+        return output_dir / "train.jsonl", output_dir / "val.jsonl"
 
     @staticmethod
     def _local_path(location: DataLocation, name: str) -> Path:
