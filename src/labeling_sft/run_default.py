@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from labeling_sft.configs import QLoRAConfig
-from labeling_sft.contracts import ArtifactLocation, DataLocation, DatasetBuildRequest
+from labeling_sft.contracts import ArtifactLocation, DataLocation, DatasetBuildRequest, DatasetSplit
 from labeling_sft.dataset_builders import SqliteLocalBuilder
 from labeling_sft.dataset_loaders import LocalJsonlDatasetLoader
 from labeling_sft.exporters import GGUFExporter
@@ -29,6 +29,24 @@ def load_config(source: str | Path | Mapping[str, Any]) -> QLoRAConfig:
     return config
 
 
+def _resume_dataset(work_dir: Path) -> DatasetSplit | None:
+    """Return the persisted split when a previous training checkpoint exists."""
+    if not any(path.is_dir() for path in work_dir.glob("checkpoint-*")):
+        return None
+
+    train = work_dir / "Alpaca" / "train.jsonl"
+    val = work_dir / "Alpaca" / "val.jsonl"
+    if not train.is_file() or not val.is_file() or not train.stat().st_size or not val.stat().st_size:
+        raise RuntimeError(
+            "Cannot resume: a training checkpoint exists but the persisted "
+            "Alpaca train/val split is missing or empty."
+        )
+    return DatasetSplit(
+        train=DataLocation.local(str(train), format="jsonl"),
+        val=DataLocation.local(str(val), format="jsonl"),
+    )
+
+
 def run_default(
     config: str | Path | Mapping[str, Any],
     database: str | Path,
@@ -45,6 +63,10 @@ def run_default(
         QLoRATrainer(training_config, LocalJsonlDatasetLoader()),
         GGUFExporter(outtype),
     )
+    training_target = ArtifactLocation.local(str(output))
+    export_target = ArtifactLocation.local(str(output / f"model-{outtype}.gguf"))
+    if dataset := _resume_dataset(output):
+        return pipeline.run_from_dataset(dataset, training_target, export_target)
     return pipeline.run(
         DatasetBuildRequest(
             source=DataLocation.local(str(Path(database).expanduser().resolve())),
@@ -53,8 +75,8 @@ def run_default(
             seed=training_config.seed,
             work_dir=str(output),
         ),
-        ArtifactLocation.local(str(output)),
-        ArtifactLocation.local(str(output / f"model-{outtype}.gguf")),
+        training_target,
+        export_target,
     )
 
 

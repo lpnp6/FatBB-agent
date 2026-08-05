@@ -52,6 +52,15 @@ class SFTOrchestrator:
     ) -> PipelineResult:
         """Build, train, then export a model."""
         dataset = self._dataset_builder.build(dataset_request)
+        return self.run_from_dataset(dataset, training_target, export_target)
+
+    def run_from_dataset(
+        self,
+        dataset: DatasetSplit,
+        training_target: ArtifactLocation,
+        export_target: ArtifactLocation,
+    ) -> PipelineResult:
+        """Train and export from an already-built dataset split."""
         training = self._trainer.train(dataset, training_target)
         export = self._exporter.export(training, export_target)
         return PipelineResult(dataset=dataset, training=training, export=export)
