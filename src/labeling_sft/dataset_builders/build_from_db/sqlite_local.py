@@ -52,7 +52,7 @@ class SqliteLocalBuilder(BaseDatasetBuilder):
         with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True) as database:
             rows = database.execute(
                 "SELECT raw_text, output FROM simhashes "
-                "WHERE status = 'completed' "
+                "WHERE status = 'accepted' "
                 "AND raw_text IS NOT NULL AND output IS NOT NULL"
             )
             return [
