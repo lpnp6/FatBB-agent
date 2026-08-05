@@ -124,7 +124,7 @@ class _CompletionOnlyCollator:
         return None
 
     def __call__(self, examples: list[dict[str, Any]]) -> dict[str, Any]:
-        import torch
+        import torch # pyright: ignore[reportMissingImports]
 
         batch = self._tokenizer.pad(examples, return_tensors="pt")
         labels = batch["input_ids"].clone()
@@ -194,8 +194,8 @@ class QLoRATrainer(BaseTrainer):
         split: DatasetSplit,
     ) -> TrainingResult:
         """Execute the full QLoRA training pipeline."""
-        import torch
-        from transformers import EarlyStoppingCallback, Trainer, TrainingArguments
+        import torch # pyright: ignore[reportMissingImports]
+        from transformers import EarlyStoppingCallback, Trainer, TrainingArguments # pyright: ignore[reportMissingImports]
 
         if not torch.cuda.is_available():
             logger.error("CUDA GPU is required for QLoRA training, but no GPU was detected")
