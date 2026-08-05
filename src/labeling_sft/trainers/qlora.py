@@ -1,24 +1,13 @@
-"""QLoRA fine-tuning trainer for Qwen2.5-3B-Instruct on recipe labeling data.
-
-Wraps each Alpaca-format example in the Qwen chat template with the system
-prompt loaded from ``labeling_sft/system.txt``.  Only assistant tokens
-contribute to the loss (via ``_CompletionOnlyCollator``).
-
-Usage::
-
-    PYTHONPATH=src python -m labeling_sft.trainers.qlora
-    PYTHONPATH=src python -m labeling_sft.trainers.qlora --max_steps 5  # smoke test
-"""
+"""QLoRA fine-tuning trainer for Alpaca-format datasets."""
 
 from __future__ import annotations
 
-import argparse
 import logging
 from pathlib import Path
 from typing import Any
 
-from labeling_sft.configs.qlora import QLoRAConfig, _qlora_config_fields
-from labeling_sft.contracts import DatasetRecord, DatasetSplit, TrainingResult
+from labeling_sft.configs.qlora import QLoRAConfig
+from labeling_sft.contracts import ArtifactLocation, DatasetRecord, DatasetSplit, TrainingResult
 from labeling_sft.dataset_loaders import LocalJsonlDatasetLoader
 from labeling_sft.interfaces.dataset_loader import BaseDatasetLoader
 from labeling_sft.interfaces.trainer import BaseTrainer
@@ -170,6 +159,7 @@ class QLoRATrainer(BaseTrainer):
         super().__init__(config)
         if (
             not config.project_name
+            or config.project_name in {".", ".."}
             or Path(config.project_name).name != config.project_name
             or not config.system_prompt_path
         ):
@@ -223,14 +213,8 @@ class QLoRATrainer(BaseTrainer):
         model, tokenizer = self.load_model()
 
         # -- Tokenize -----------------------------------------------------
-        train_cache = (
-            str(Path(self.config.output_dir) / "cache" / "train.tok")
-            if self.config.dataset_cache else None
-        )
-        val_cache = (
-            str(Path(self.config.output_dir) / "cache" / "val.tok")
-            if self.config.dataset_cache else None
-        )
+        train_cache = str(self.config.project_dir / "cache" / "train.tok") if self.config.dataset_cache else None
+        val_cache = str(self.config.project_dir / "cache" / "val.tok") if self.config.dataset_cache else None
         tokenized_train = self._tokenize_dataset(
             train_examples, tokenizer, self.config.max_seq_length, cache_dir=train_cache,
         )
@@ -245,7 +229,7 @@ class QLoRATrainer(BaseTrainer):
         # -- Auto-resume: pick up the latest checkpoint -------------------
         resume_from = self.config.resume_from_checkpoint
         if resume_from is None:
-            output = Path(self.config.output_dir)
+            output = self.config.project_dir
             checkpoints = sorted(output.glob("checkpoint-*")) if output.is_dir() else []
             if checkpoints:
                 resume_from = str(checkpoints[-1])
@@ -253,7 +237,7 @@ class QLoRATrainer(BaseTrainer):
 
         # -- Training arguments -------------------------------------------
         training_args = TrainingArguments(
-            output_dir=self.config.output_dir,
+            output_dir=str(self.config.project_dir),
             per_device_train_batch_size=self.config.per_device_train_batch_size,
             per_device_eval_batch_size=1,
             gradient_accumulation_steps=self.config.gradient_accumulation_steps,
@@ -307,22 +291,25 @@ class QLoRATrainer(BaseTrainer):
         train_result = trainer.train()
 
         # -- Save ---------------------------------------------------------
-        trainer.save_model(self.config.output_dir)
-        tokenizer.save_pretrained(self.config.output_dir)
-        logger.info("Model and tokenizer saved to %s", self.config.output_dir)
+        trainer.save_model(self.config.project_dir)
+        tokenizer.save_pretrained(self.config.project_dir)
+        logger.info("Model and tokenizer saved to %s", self.config.project_dir)
 
         # -- Build result ------------------------------------------------
         final_eval_loss: float | None = None
         if hasattr(train_result, 'metrics') and 'eval_loss' in train_result.metrics:
             final_eval_loss = float(train_result.metrics['eval_loss'])
 
+        best_checkpoint = getattr(trainer.state, "best_model_checkpoint", None)
         return TrainingResult(
-            output_dir=self.config.output_dir,
-            adapter_path=self.config.output_dir,
+            model=ArtifactLocation.local(str(self.config.project_dir)),
+            adapter=ArtifactLocation.local(str(self.config.project_dir)),
             base_model_id=self.config.model_id,
             final_eval_loss=final_eval_loss,
             total_steps=getattr(train_result, 'global_step', 0),
-            best_checkpoint=getattr(trainer.state, 'best_model_checkpoint', None),
+            best_checkpoint=(
+                ArtifactLocation.local(best_checkpoint) if best_checkpoint else None
+            ),
         )
 
     # ── Internal helpers ────────────────────────────────────────────────
@@ -374,8 +361,8 @@ class QLoRATrainer(BaseTrainer):
 
     def _load_base_model_and_tokenizer(self) -> tuple[Any, Any]:
         """Load the 4-bit quantised base model and its tokenizer."""
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        import torch # pyright: ignore[reportMissingImports]
+        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig # pyright: ignore[reportMissingImports]
 
         compute_dtype = getattr(torch, self.config.bnb_4bit_compute_dtype)
         bnb_config = BitsAndBytesConfig(
@@ -414,7 +401,7 @@ class QLoRATrainer(BaseTrainer):
 
     def _apply_lora(self, model: Any) -> Any:
         """Wrap *model* with a LoRA adapter and enable k-bit training."""
-        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training # pyright: ignore[reportMissingImports]
 
         model = prepare_model_for_kbit_training(model)
 
@@ -423,7 +410,7 @@ class QLoRATrainer(BaseTrainer):
             lora_alpha=self.config.lora_alpha,
             lora_dropout=self.config.lora_dropout,
             target_modules=list(self.config.lora_target_modules),
-            bias="none",
+            bias=self.config.lora_bias,
             task_type="CAUSAL_LM",
         )
         model = get_peft_model(model, lora_config)
@@ -439,7 +426,7 @@ class QLoRATrainer(BaseTrainer):
         cache_dir: str | None = None,
     ) -> Any:
         """Tokenize a list of ``{"text": ...}`` dicts into a ``Dataset``."""
-        from datasets import Dataset
+        from datasets import Dataset # pyright: ignore[reportMissingImports]
 
         if cache_dir is not None:
             cache_path = Path(cache_dir)
@@ -467,51 +454,3 @@ class QLoRATrainer(BaseTrainer):
             logger.info("Cached tokenized dataset to %s", cache_dir)
 
         return tokenized
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="QLoRA fine-tune Qwen2.5-3B-Instruct on recipe labeling data",
-    )
-    defaults = QLoRAConfig()
-    for field_name in _qlora_config_fields():
-        default = getattr(defaults, field_name)
-        if field_name in ("lora_target_modules",):
-            continue
-        if field_name in ("project_name", "system_prompt_path"):
-            parser.add_argument(f"--{field_name}", required=True)
-            continue
-        if isinstance(default, bool) and default is True:
-            parser.add_argument(f"--{field_name}", action="store_true", default=None)
-            parser.add_argument(f"--no-{field_name}", action="store_false", dest=field_name, default=None)
-        elif isinstance(default, bool):
-            parser.add_argument(f"--{field_name}", action="store_true", default=None)
-        else:
-            parser.add_argument(f"--{field_name}", type=type(default), default=None)
-    parser.add_argument(
-        "--max_steps", type=int, default=None,
-        help="Limit training to N steps (for smoke testing)",
-    )
-    return parser
-
-
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    parser = _build_arg_parser()
-    args = parser.parse_args()
-    config = QLoRAConfig.from_cli_args(args)
-
-    trainer = QLoRATrainer(config)
-    trainer.train(DatasetSplit(
-        train=DataLocation.local(str(Path(config.output_dir) / "train.jsonl"), format="jsonl"),
-        val=DataLocation.local(str(Path(config.output_dir) / "val.jsonl"), format="jsonl"),
-    ))

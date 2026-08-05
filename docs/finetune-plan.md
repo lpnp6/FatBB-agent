@@ -184,6 +184,8 @@ class QLoRAConfig:
 
 **_CompletionOnlyCollator** — self-contained collator (30 lines). Replaces `DataCollatorForCompletionOnlyLM` which was moved to `trl` in transformers v5. Tokenizes `<|im_start|>assistant`, finds its position in each sequence, masks all preceding tokens with `-100` in labels. Loss computed only on assistant-generated content.
 
+**Dynamic padding** — tokenization uses `truncation=True`, `max_length=4096`, and `padding=False`. Therefore each record retains its actual sequence length; `max_length` is a truncation ceiling, not a fixed padded length. At batch time, `_CompletionOnlyCollator` calls `tokenizer.pad(...)` and pads only to the longest sequence in that batch, so tensors remain rectangular without padding every short sample to 4096 tokens. Padding positions must also be masked with `-100` in `labels` so they do not contribute to loss when batch size is greater than one.
+
 **Auto-resume** — before creating `TrainingArguments`, scans `output_dir/checkpoint-*` and picks the latest. If found, passes `resume_from_checkpoint` to Trainer. Re-running the same command after Ctrl+C continues from the last saved step, restoring model weights, optimizer momentum, LR scheduler position, and RNG state.
 
 **GPU Memory Management** — three strategies work together to keep Qwen2.5-3B + LoRA within 8 GB VRAM:

@@ -7,7 +7,8 @@ lr=2e-4, epochs=3, max_seq=4096.  Fits a single RTX 4060 8 GB.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 from labeling_sft.interfaces.config import BaseConfig
@@ -45,6 +46,9 @@ class QLoRAConfig(BaseConfig):
 
     lora_dropout: float = 0.05
     """Dropout applied to LoRA adapter weights."""
+
+    lora_bias: str = "none"
+    """Bias training mode: ``none``, ``all``, or ``lora_only``."""
 
     lora_target_modules: tuple[str, ...] = (
         "q_proj", "k_proj", "v_proj", "o_proj",
@@ -103,10 +107,6 @@ class QLoRAConfig(BaseConfig):
     max_grad_norm: float = 0.3
     """Gradient clipping threshold."""
 
-    # ── Output ───────────────────────────────────────────────────────────
-    output_dir: str = "models/qwen2.5-3b-fatbb-v1"
-    """Directory to save the LoRA adapter weights and tokenizer."""
-
     logging_steps: int = 10
     """Log training metrics every N steps."""
 
@@ -120,7 +120,7 @@ class QLoRAConfig(BaseConfig):
     """Random seed for reproducibility."""
 
     dataset_cache: bool = True
-    """Persist tokenized datasets to ``{output_dir}/cache/``.
+    """Persist tokenized datasets to ``~/.fatbb/<project_name>/cache/``.
     Re-loading skips CPU tokenisation on restart."""
 
     resume_from_checkpoint: str | None = None
@@ -154,8 +154,12 @@ class QLoRAConfig(BaseConfig):
     def validate(self) -> list[str]:
         """Validate configuration."""
         problems: list[str] = []
-        if not self.project_name:
-            problems.append("project_name is required")
+        if (
+            not self.project_name
+            or self.project_name in {".", ".."}
+            or Path(self.project_name).name != self.project_name
+        ):
+            problems.append("project_name must be a single directory name")
         if not self.system_prompt_path:
             problems.append("system_prompt_path is required")
         if self.lora_r < 1:
@@ -164,6 +168,8 @@ class QLoRAConfig(BaseConfig):
             problems.append("lora_alpha must be >= 1")
         if not 0.0 <= self.lora_dropout < 1.0:
             problems.append("lora_dropout must be in [0.0, 1.0)")
+        if self.lora_bias not in {"none", "all", "lora_only"}:
+            problems.append("lora_bias must be none, all, or lora_only")
         if self.max_seq_length < 128:
             problems.append("max_seq_length must be >= 128")
         if not 0.0 < self.val_split <= 0.5:
@@ -179,6 +185,11 @@ class QLoRAConfig(BaseConfig):
         if self.save_total_limit < 1:
             problems.append("save_total_limit must be >= 1")
         return problems
+
+    @property
+    def project_dir(self) -> Path:
+        """Root directory for this project's training artifacts."""
+        return Path.home() / ".fatbb" / self.project_name
 
     # ── Backward-compat aliases for train.py ─────────────────────────────
 

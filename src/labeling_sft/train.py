@@ -7,9 +7,6 @@
 
 from __future__ import annotations
 
-import argparse
-import logging
-from pathlib import Path
 # Re-export key symbols so existing imports don't break
 from labeling_sft.trainers.qlora import (
     QLoRATrainer,
@@ -19,7 +16,7 @@ from labeling_sft.trainers.qlora import (
     format_example,
     load_system_prompt,
 )
-from labeling_sft.configs.qlora import QLoRAConfig, _qlora_config_fields as _config_fields  # noqa: F401
+from labeling_sft.configs.qlora import QLoRAConfig
 from labeling_sft.contracts import DataLocation, DatasetSplit
 
 __all__ = [
@@ -45,22 +42,7 @@ def run_training(config: QLoRAConfig) -> None:
     """
     trainer = QLoRATrainer(config)
     trainer.train(DatasetSplit(
-        train=DataLocation.local(str(Path(config.output_dir) / "train.jsonl"), format="jsonl"),
-        val=DataLocation.local(str(Path(config.output_dir) / "val.jsonl"), format="jsonl"),
+        train=DataLocation.local(str(config.project_dir / "Alpaca" / "train.jsonl"), format="jsonl"),
+        val=DataLocation.local(str(config.project_dir / "Alpaca" / "val.jsonl"), format="jsonl"),
     ))
 
-
-# CLI entry point (delegates to QLoRATrainer's CLI)
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    from labeling_sft.trainers.qlora import _build_arg_parser
-
-    parser = _build_arg_parser()
-    args = parser.parse_args()
-    config = QLoRAConfig.from_cli_args(args)
-    run_training(config)

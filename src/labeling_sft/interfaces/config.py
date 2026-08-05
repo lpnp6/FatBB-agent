@@ -22,9 +22,6 @@ class BaseConfig(ABC):
     model_id: str
     """Hugging Face model ID or local path."""
 
-    output_dir: str
-    """Model / adapter output directory."""
-
     seed: int
     """Random seed for reproducibility."""
 
