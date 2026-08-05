@@ -86,6 +86,23 @@ class DatasetStats:
     # Example: {"recipetineats": {"train": 183, "val": 32}, ...}
 
 
+@dataclass(frozen=True)
+class DatasetBuildRequest:
+    """Input contract for a dataset build operation.
+
+    ``source`` describes the labeled input and the ``*_target`` fields
+    describe where the builder should persist its artifacts. A concrete
+    builder declares which :class:`DataLocationType` values it supports.
+    """
+
+    source: DataLocation
+    train_target: DataLocation
+    val_target: DataLocation
+    stats_target: DataLocation | None = None
+    val_split: float = 0.15
+    seed: int = 42
+
+
 @dataclass
 class DatasetSplit:
     """Return value of ``BaseDatasetBuilder.build()``.
@@ -112,4 +129,4 @@ class DatasetSplit:
 
     train: DataLocation
     val: DataLocation
-    stats: DatasetStats
+    stats: DatasetStats | None = None  # optional when consuming pre-built data

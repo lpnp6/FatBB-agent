@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from labeling_sft.contracts import DataLocation, DatasetBuildRequest
 from labeling_sft.dataset_builders.bootstrap import BootstrapDatasetBuilder
 
 # Re-export the class
@@ -32,14 +33,14 @@ def build_dataset(
         a typed :class:`~labeling_sft.interfaces.contracts.DatasetSplit`.
     """
     builder = BootstrapDatasetBuilder()
-    split = builder.build(
-        input_path=input_path,
-        train_path=train_path,
-        val_path=val_path,
-        stats_path=stats_path,
+    split = builder.build(DatasetBuildRequest(
+        source=DataLocation.local(input_path, format="jsonl"),
+        train_target=DataLocation.local(train_path, format="jsonl"),
+        val_target=DataLocation.local(val_path, format="jsonl"),
+        stats_target=DataLocation.local(stats_path, format="json"),
         val_split=val_split,
         seed=seed,
-    )
+    ))
     s = split.stats
     return {
         "total_valid_records": s.total_valid_records,

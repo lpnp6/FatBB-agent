@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from labeling_sft.configs.qlora import QLoRAConfig, _qlora_config_fields
-from labeling_sft.contracts import TrainingResult
+from labeling_sft.contracts import DataLocation, DataLocationType, DatasetSplit, TrainingResult
 from labeling_sft.interfaces.trainer import BaseTrainer
 
 logger = logging.getLogger(__name__)
@@ -173,12 +173,11 @@ class QLoRATrainer(BaseTrainer):
 
     def load_data(
         self,
-        train_path: str,
-        val_path: str,
+        split: DatasetSplit,
     ) -> tuple[Any, Any]:
         """Load and format training / validation JSONL files."""
-        train_file = Path(train_path)
-        val_file = Path(val_path)
+        train_file = self._local_jsonl_path(split.train, "train")
+        val_file = self._local_jsonl_path(split.val, "val")
         for name, path in [("train", train_file), ("val", val_file)]:
             if not path.exists():
                 raise FileNotFoundError(
@@ -206,8 +205,7 @@ class QLoRATrainer(BaseTrainer):
 
     def train(
         self,
-        train_path: str,
-        val_path: str,
+        split: DatasetSplit,
     ) -> TrainingResult:
         """Execute the full QLoRA training pipeline."""
         import torch
@@ -222,7 +220,7 @@ class QLoRATrainer(BaseTrainer):
         _gpu_snapshot("startup (before anything)")
 
         # -- Data ---------------------------------------------------------
-        train_examples, val_examples = self.load_data(train_path, val_path)
+        train_examples, val_examples = self.load_data(split)
 
         # -- Model & tokenizer --------------------------------------------
         model, tokenizer = self.load_model()
@@ -331,6 +329,15 @@ class QLoRATrainer(BaseTrainer):
         )
 
     # ── Internal helpers ────────────────────────────────────────────────
+
+    @staticmethod
+    def _local_jsonl_path(location: DataLocation, name: str) -> Path:
+        if location.type is not DataLocationType.LOCAL_PATH:
+            raise NotImplementedError(
+                f"QLoRATrainer only supports local JSONL; "
+                f"{name} uses {location.type.value}"
+            )
+        return Path(location.value)
 
     @staticmethod
     def _load_jsonl(jsonl_path: str, system_prompt: str) -> list[dict[str, str]]:
@@ -490,7 +497,7 @@ if __name__ == "__main__":
     config = QLoRAConfig.from_cli_args(args)
 
     trainer = QLoRATrainer(config)
-    trainer.train(
-        train_path=str(Path(config.output_dir) / "train.jsonl"),
-        val_path=str(Path(config.output_dir) / "val.jsonl"),
-    )
+    trainer.train(DatasetSplit(
+        train=DataLocation.local(str(Path(config.output_dir) / "train.jsonl"), format="jsonl"),
+        val=DataLocation.local(str(Path(config.output_dir) / "val.jsonl"), format="jsonl"),
+    ))

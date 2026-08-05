@@ -8,6 +8,7 @@ depending on each other's internal types.
 from labeling_sft.contracts.dataset import (
     DataLocation,
     DataLocationType,
+    DatasetBuildRequest,
     DatasetRecord,
     DatasetSplit,
     DatasetStats,
@@ -20,6 +21,7 @@ __all__ = [
     # Dataset
     "DataLocation",
     "DataLocationType",
+    "DatasetBuildRequest",
     "DatasetRecord",
     "DatasetSplit",
     "DatasetStats",

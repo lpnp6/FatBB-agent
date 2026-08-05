@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from labeling_sft.contracts import DatasetSplit
+from labeling_sft.contracts import DatasetBuildRequest, DatasetSplit
 
 
 class BaseDatasetBuilder(ABC):
@@ -21,45 +21,18 @@ class BaseDatasetBuilder(ABC):
     @abstractmethod
     def build(
         self,
-        input_path: str,
-        train_path: str,
-        val_path: str,
-        stats_path: str,
-        val_split: float = 0.15,
-        seed: int = 42,
+        request: DatasetBuildRequest,
     ) -> DatasetSplit:
         """Execute dataset build.
 
         Args:
-            input_path: Path to raw labeled data (format depends on subclass).
-            train_path: Where to write training split.
-            val_path:   Where to write validation split.
-            stats_path: Where to write dataset statistics JSON.
-            val_split:  Validation fraction (0.0–1.0).
-            seed:       Random seed.
+            request: Source location, artifact targets, and split parameters.
 
         Returns:
-            DatasetSplit with output paths and statistics.
+            DatasetSplit with output locations and statistics.
 
         Raises:
-            FileNotFoundError: ``input_path`` does not exist.
+            FileNotFoundError: The source does not exist.
             ValueError:        No valid records found.
-        """
-        ...
-
-    @abstractmethod
-    def load_split(
-        self,
-        train_path: str,
-        val_path: str,
-    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        """Load a pre-built split back into memory as record lists.
-
-        Each record is ``{"instruction": ..., "input": ..., "output": ...}``.
-
-        Used by :meth:`BaseTrainer.load_data` and by Evaluator to read data.
-
-        Returns:
-            ``(train_records, val_records)``
         """
         ...

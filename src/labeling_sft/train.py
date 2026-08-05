@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
-
 # Re-export key symbols so existing imports don't break
 from labeling_sft.trainers.qlora import (
     QLoRATrainer,
@@ -21,6 +20,7 @@ from labeling_sft.trainers.qlora import (
     load_system_prompt,
 )
 from labeling_sft.configs.qlora import QLoRAConfig, _qlora_config_fields as _config_fields  # noqa: F401
+from labeling_sft.contracts import DataLocation, DatasetSplit
 
 __all__ = [
     "QLoRATrainer",
@@ -44,10 +44,10 @@ def run_training(config: QLoRAConfig) -> None:
         :class:`~labeling_sft.interfaces.contracts.TrainingResult`.
     """
     trainer = QLoRATrainer(config)
-    trainer.train(
-        train_path=str(Path(config.output_dir) / "train.jsonl"),
-        val_path=str(Path(config.output_dir) / "val.jsonl"),
-    )
+    trainer.train(DatasetSplit(
+        train=DataLocation.local(str(Path(config.output_dir) / "train.jsonl"), format="jsonl"),
+        val=DataLocation.local(str(Path(config.output_dir) / "val.jsonl"), format="jsonl"),
+    ))
 
 
 # CLI entry point (delegates to QLoRATrainer's CLI)

@@ -6,11 +6,11 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from .config import BaseConfig
-from labeling_sft.contracts import TrainingResult
+from labeling_sft.contracts import DatasetSplit, TrainingResult
 
 
 class BaseTrainer(ABC):
-    """Train a model using a :class:`BaseConfig` and data files.
+    """Train a model using a :class:`BaseConfig` and a dataset split.
 
     The training pipeline is split into three independently-overridable stages:
 
@@ -32,8 +32,7 @@ class BaseTrainer(ABC):
     @abstractmethod
     def load_data(
         self,
-        train_path: str,
-        val_path: str,
+        split: DatasetSplit,
     ) -> tuple[Any, Any]:
         """Load and preprocess training / validation data.
 
@@ -54,21 +53,19 @@ class BaseTrainer(ABC):
     @abstractmethod
     def train(
         self,
-        train_path: str,
-        val_path: str,
+        split: DatasetSplit,
     ) -> TrainingResult:
         """Execute the full training pipeline.
 
         Default implementation pattern::
 
-            train_ds, val_ds = self.load_data(train_path, val_path)
+            train_ds, val_ds = self.load_data(split)
             model, tokenizer = self.load_model()
             # ... training loop ...
             return TrainingResult(...)
 
         Args:
-            train_path: Path to ``train.jsonl``.
-            val_path:   Path to ``val.jsonl``.
+            split: Locations and optional statistics produced by a dataset builder.
 
         Returns:
             :class:`~labeling_sft.interfaces.contracts.TrainingResult`.

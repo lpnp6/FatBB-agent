@@ -27,7 +27,13 @@ from typing import Any
 
 import random
 
-from labeling_sft.contracts import DatasetSplit, DatasetStats
+from labeling_sft.contracts import (
+    DataLocation,
+    DataLocationType,
+    DatasetBuildRequest,
+    DatasetSplit,
+    DatasetStats,
+)
 from labeling_sft.interfaces.dataset_builder import BaseDatasetBuilder
 
 
@@ -100,17 +106,19 @@ class BootstrapDatasetBuilder(BaseDatasetBuilder):
 
     def build(
         self,
-        input_path: str = "data/bootstrap/training.jsonl",
-        train_path: str = "data/training/train.jsonl",
-        val_path: str = "data/training/val.jsonl",
-        stats_path: str = "data/training/dataset_stats.json",
-        val_split: float = 0.15,
-        seed: int = 42,
+        request: DatasetBuildRequest,
     ) -> DatasetSplit:
         """Convert bootstrap JSONL to Alpaca-format train/val splits."""
-        input_file = Path(input_path)
+        input_file = self._local_path(request.source, "source")
         if not input_file.exists():
-            raise FileNotFoundError(f"Input file not found: {input_path}")
+            raise FileNotFoundError(f"Input file not found: {request.source.value}")
+        train_path = self._local_path(request.train_target, "train_target")
+        val_path = self._local_path(request.val_target, "val_target")
+        stats_path = (
+            self._local_path(request.stats_target, "stats_target")
+            if request.stats_target is not None
+            else None
+        )
 
         # --- Load and validate -------------------------------------------------
         records: list[dict[str, str]] = []
@@ -160,7 +168,7 @@ class BootstrapDatasetBuilder(BaseDatasetBuilder):
 
         # --- Stratified split (manual — avoids sklearn dependency) -------------
         domains = [r.pop("_domain") for r in records]
-        rng = random.Random(seed)
+        rng = random.Random(request.seed)
 
         # Group indices by domain
         domain_indices: dict[str, list[int]] = defaultdict(list)
@@ -171,7 +179,7 @@ class BootstrapDatasetBuilder(BaseDatasetBuilder):
         val_indices: list[int] = []
         for d, indices in sorted(domain_indices.items()):
             rng.shuffle(indices)
-            n_val = max(1, int(len(indices) * val_split + 0.5))
+            n_val = max(1, int(len(indices) * request.val_split + 0.5))
             val_indices.extend(indices[:n_val])
             train_indices.extend(indices[n_val:])
 
@@ -179,7 +187,7 @@ class BootstrapDatasetBuilder(BaseDatasetBuilder):
         val = [records[i] for i in sorted(val_indices)]
 
         # --- Write outputs -----------------------------------------------------
-        for path, subset in [(Path(train_path), train), (Path(val_path), val)]:
+        for path, subset in [(train_path, train), (val_path, val)]:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("w", encoding="utf-8") as fh:
                 for record in subset:
@@ -204,60 +212,48 @@ class BootstrapDatasetBuilder(BaseDatasetBuilder):
             not_a_recipe_count=not_recipe_count,
             train_count=len(train),
             val_count=len(val),
-            val_split=val_split,
-            seed=seed,
+            val_split=request.val_split,
+            seed=request.seed,
             domain_distribution=domain_dist,
         )
 
-        stats_path_obj = Path(stats_path)
-        stats_path_obj.parent.mkdir(parents=True, exist_ok=True)
-        stats_path_obj.write_text(
-            json.dumps(
-                {
-                    "total_valid_records": stats.total_valid_records,
-                    "skipped_records": stats.skipped_records,
-                    "recipe_count": stats.recipe_count,
-                    "not_a_recipe_count": stats.not_a_recipe_count,
-                    "train_count": stats.train_count,
-                    "val_count": stats.val_count,
-                    "val_split": stats.val_split,
-                    "seed": stats.seed,
-                    "train_domains": dict(train_domain_counts),
-                    "val_domains": dict(val_domain_counts),
-                },
-                ensure_ascii=False,
-                indent=2,
+        if stats_path is not None:
+            stats_path.parent.mkdir(parents=True, exist_ok=True)
+            stats_path.write_text(
+                json.dumps(
+                    {
+                        "total_valid_records": stats.total_valid_records,
+                        "skipped_records": stats.skipped_records,
+                        "recipe_count": stats.recipe_count,
+                        "not_a_recipe_count": stats.not_a_recipe_count,
+                        "train_count": stats.train_count,
+                        "val_count": stats.val_count,
+                        "val_split": stats.val_split,
+                        "seed": stats.seed,
+                        "train_domains": dict(train_domain_counts),
+                        "val_domains": dict(val_domain_counts),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
             )
-            + "\n",
-            encoding="utf-8",
-        )
 
         return DatasetSplit(
-            train_path=str(Path(train_path).resolve()),
-            val_path=str(Path(val_path).resolve()),
+            train=request.train_target,
+            val=request.val_target,
             stats=stats,
         )
 
-    def load_split(
-        self,
-        train_path: str,
-        val_path: str,
-    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        """Load pre-built splits back into memory."""
-        train: list[dict[str, str]] = []
-        val: list[dict[str, str]] = []
-
-        for path, target in [(train_path, train), (val_path, val)]:
-            p = Path(path)
-            if not p.exists():
-                raise FileNotFoundError(f"Split file not found: {path}")
-            with p.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line:
-                        target.append(json.loads(line))
-
-        return train, val
+    @staticmethod
+    def _local_path(location: DataLocation, name: str) -> Path:
+        if location.type is not DataLocationType.LOCAL_PATH:
+            raise NotImplementedError(
+                f"BootstrapDatasetBuilder only supports local paths; "
+                f"{name} uses {location.type.value}"
+            )
+        return Path(location.value)
 
 
 # ---------------------------------------------------------------------------
@@ -293,14 +289,14 @@ if __name__ == "__main__":
 
     builder = BootstrapDatasetBuilder()
     try:
-        split = builder.build(
-            input_path=args.input,
-            train_path=str(out / "train.jsonl"),
-            val_path=str(out / "val.jsonl"),
-            stats_path=str(out / "dataset_stats.json"),
+        split = builder.build(DatasetBuildRequest(
+            source=DataLocation.local(args.input, format="jsonl"),
+            train_target=DataLocation.local(str(out / "train.jsonl"), format="jsonl"),
+            val_target=DataLocation.local(str(out / "val.jsonl"), format="jsonl"),
+            stats_target=DataLocation.local(str(out / "dataset_stats.json"), format="json"),
             val_split=args.val_split,
             seed=args.seed,
-        )
+        ))
     except FileNotFoundError as exc:
         print(f"Error: {exc}")
         raise SystemExit(1) from exc
