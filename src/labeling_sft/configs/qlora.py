@@ -30,6 +30,12 @@ class QLoRAConfig(BaseConfig):
     model_id: str = "Qwen/Qwen2.5-3B-Instruct"
     """Hugging Face model id or local path."""
 
+    project_name: str = ""
+    """Project name; training logs are written under ``~/.fatbb/<project_name>``."""
+
+    system_prompt_path: str = ""
+    """Path to the system prompt text file."""
+
     # ── LoRA ─────────────────────────────────────────────────────────────
     lora_r: int = 16
     """LoRA rank (docs: r=16)."""
@@ -148,6 +154,10 @@ class QLoRAConfig(BaseConfig):
     def validate(self) -> list[str]:
         """Validate configuration."""
         problems: list[str] = []
+        if not self.project_name:
+            problems.append("project_name is required")
+        if not self.system_prompt_path:
+            problems.append("system_prompt_path is required")
         if self.lora_r < 1:
             problems.append("lora_r must be >= 1")
         if self.lora_alpha < 1:

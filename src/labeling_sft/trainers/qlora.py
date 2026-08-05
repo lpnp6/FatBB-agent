@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -92,14 +91,9 @@ def _make_memory_watchdog(
 # Prompt formatting
 # ---------------------------------------------------------------------------
 
-def load_system_prompt() -> str:
-    """Return the system prompt shipped with the package."""
-    return (
-        files("labeling_sft")
-        .joinpath("system.txt")
-        .read_text(encoding="utf-8")
-        .strip()
-    )
+def load_system_prompt(path: str | Path) -> str:
+    """Read the system prompt from *path*."""
+    return Path(path).read_text(encoding="utf-8").strip()
 
 
 def format_example(record: dict[str, str], system_prompt: str) -> str:
@@ -168,6 +162,13 @@ class QLoRATrainer(BaseTrainer):
 
     def __init__(self, config: QLoRAConfig) -> None:
         super().__init__(config)
+        if (
+            not config.project_name
+            or Path(config.project_name).name != config.project_name
+            or not config.system_prompt_path
+        ):
+            raise ValueError("project_name and system_prompt_path are required")
+        self._configure_logging(config.project_name)
 
     # ── BaseTrainer implementation ──────────────────────────────────────
 
@@ -187,7 +188,7 @@ class QLoRATrainer(BaseTrainer):
             if path.stat().st_size == 0:
                 raise ValueError(f"{name} file is empty: {path}")
 
-        system_prompt = load_system_prompt()
+        system_prompt = load_system_prompt(self.config.system_prompt_path)
 
         train_examples = self._load_jsonl(str(train_file), system_prompt)
         val_examples = self._load_jsonl(str(val_file), system_prompt)
@@ -331,6 +332,29 @@ class QLoRATrainer(BaseTrainer):
     # ── Internal helpers ────────────────────────────────────────────────
 
     @staticmethod
+    def _configure_logging(project_name: str) -> None:
+        log_path = Path.home() / ".fatbb" / project_name / "train.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if any(getattr(handler, "_fatbb_log_path", None) == str(log_path) for handler in logger.handlers):
+            return
+
+        for handler in list(logger.handlers):
+            if getattr(handler, "_fatbb_log_path", None):
+                logger.removeHandler(handler)
+                handler.close()
+
+        formatter = logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        for handler in (logging.StreamHandler(), logging.FileHandler(log_path, encoding="utf-8")):
+            handler.setFormatter(formatter)
+            handler._fatbb_log_path = str(log_path)  # type: ignore[attr-defined]
+            logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+
+    @staticmethod
     def _local_jsonl_path(location: DataLocation, name: str) -> Path:
         if location.type is not DataLocationType.LOCAL_PATH:
             raise NotImplementedError(
@@ -470,6 +494,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     for field_name in _qlora_config_fields():
         default = getattr(defaults, field_name)
         if field_name in ("lora_target_modules",):
+            continue
+        if field_name in ("project_name", "system_prompt_path"):
+            parser.add_argument(f"--{field_name}", required=True)
             continue
         if isinstance(default, bool) and default is True:
             parser.add_argument(f"--{field_name}", action="store_true", default=None)

@@ -17,25 +17,16 @@ class BaseConfig(ABC):
         - Future: ``FullFinetuneConfig``, ``DPOConfig``, ...
     """
 
-    # ── Required properties ──────────────────────────────────────────────
+    # ── Required data ────────────────────────────────────────────────────
 
-    @property
-    @abstractmethod
-    def model_id(self) -> str:
-        """Hugging Face model ID or local path."""
-        ...
+    model_id: str
+    """Hugging Face model ID or local path."""
 
-    @property
-    @abstractmethod
-    def output_dir(self) -> str:
-        """Model / adapter output directory."""
-        ...
+    output_dir: str
+    """Model / adapter output directory."""
 
-    @property
-    @abstractmethod
-    def seed(self) -> int:
-        """Random seed for reproducibility."""
-        ...
+    seed: int
+    """Random seed for reproducibility."""
 
     # ── Serialization ────────────────────────────────────────────────────
 
