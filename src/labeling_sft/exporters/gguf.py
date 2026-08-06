@@ -79,7 +79,18 @@ class GGUFExporter(BaseExporter):
         convert_script = self._convert_script()
         compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
-        with TemporaryDirectory(prefix="fatbb-gguf-") as temporary:
+        # Prefer D: on Windows — the system temp dir on C: is often too small
+        _tmp_root = None
+        if sys.platform == "win32":
+            for _drive in ("D:", "E:", "F:"):
+                _candidate = Path(_drive) / "fatbb_tmp"
+                try:
+                    _candidate.mkdir(parents=True, exist_ok=True)
+                    _tmp_root = str(_candidate)
+                    break
+                except OSError:
+                    continue
+        with TemporaryDirectory(prefix="fatbb-gguf-", dir=_tmp_root) as temporary:
             work_dir = Path(temporary)
             merged_path = work_dir / "merged"
             gguf_path = work_dir / "model.gguf"
