@@ -234,9 +234,18 @@ class QLoRATrainer(BaseTrainer):
         resume_from = self.config.resume_from_checkpoint
         if resume_from is None:
             output = self.config.project_dir
-            checkpoints = sorted(output.glob("checkpoint-*")) if output.is_dir() else []
+            checkpoints = (
+                [
+                    path for path in output.glob("checkpoint-*")
+                    if path.is_dir() and path.name.removeprefix("checkpoint-").isdigit()
+                ]
+                if output.is_dir() else []
+            )
             if checkpoints:
-                resume_from = str(checkpoints[-1])
+                resume_from = str(max(
+                    checkpoints,
+                    key=lambda path: int(path.name.removeprefix("checkpoint-")),
+                ))
                 logger.info("Auto-resuming from latest checkpoint: %s", resume_from)
 
         # -- Training arguments -------------------------------------------
@@ -292,7 +301,7 @@ class QLoRATrainer(BaseTrainer):
         torch.cuda.empty_cache()
         _gpu_snapshot("before train() — post empty_cache")
 
-        train_result = trainer.train()
+        train_result = trainer.train(resume_from_checkpoint=resume_from)
 
         # -- Save ---------------------------------------------------------
         trainer.save_model(self.config.project_dir)
