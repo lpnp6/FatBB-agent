@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
 from labeling_sft.configs.qlora import QLoRAConfig
-from labeling_sft.contracts import ArtifactLocation, DatasetRecord, DatasetSplit, TrainingResult
+from labeling_sft.contracts import (
+    ArtifactLocation,
+    ArtifactLocationType,
+    DatasetRecord,
+    DatasetSplit,
+    TrainingResult,
+)
 from labeling_sft.artifact_store import artifact_store
 from labeling_sft.dataset_loaders import LocalJsonlDatasetLoader
 from labeling_sft.interfaces.dataset_loader import BaseDatasetLoader
@@ -198,6 +206,10 @@ class QLoRATrainer(BaseTrainer):
         artifact_target: ArtifactLocation,
     ) -> TrainingResult:
         """Execute the full QLoRA training pipeline."""
+        if completed := self._load_completed_result(artifact_target):
+            logger.info("Using completed training artifact: %s", completed.adapter.value)
+            return completed
+
         import torch # pyright: ignore[reportMissingImports]
         from transformers import EarlyStoppingCallback, Trainer, TrainingArguments # pyright: ignore[reportMissingImports]
 
@@ -316,15 +328,90 @@ class QLoRATrainer(BaseTrainer):
         artifact = artifact_store(artifact_target).publish(
             self.config.project_dir, artifact_target
         )
-        return TrainingResult(
+        result = TrainingResult(
             model=artifact,
             adapter=artifact,
             base_model_id=self.config.model_id,
             final_eval_loss=final_eval_loss,
             total_steps=getattr(train_result, 'global_step', 0),
         )
+        self._persist_completed_result(result)
+        return result
 
     # ── Internal helpers ────────────────────────────────────────────────
+
+    @property
+    def _result_path(self) -> Path:
+        return self.config.project_dir / "training_result.json"
+
+    def _load_completed_result(
+        self,
+        artifact_target: ArtifactLocation,
+    ) -> TrainingResult | None:
+        """Return a verified result written after a successful training run."""
+        if not self._result_path.is_file():
+            return None
+        try:
+            data = json.loads(self._result_path.read_text(encoding="utf-8"))
+            if data["base_model_id"] != self.config.model_id:
+                return None
+            result = TrainingResult(
+                model=self._artifact_from_dict(data["model"]),
+                adapter=self._artifact_from_dict(data["adapter"]),
+                base_model_id=data["base_model_id"],
+                final_eval_loss=data.get("final_eval_loss"),
+                total_steps=data.get("total_steps", 0),
+                best_checkpoint=(
+                    self._artifact_from_dict(data["best_checkpoint"])
+                    if data.get("best_checkpoint") else None
+                ),
+            )
+            adapter = artifact_store(result.adapter).materialize(result.adapter)
+            if result.model != artifact_target or not (adapter / "adapter_config.json").is_file():
+                return None
+            if not any((adapter / name).is_file() for name in ("adapter_model.safetensors", "adapter_model.bin")):
+                return None
+            return result
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            logger.warning("Ignoring invalid completed training result: %s", self._result_path)
+            return None
+
+    def _persist_completed_result(self, result: TrainingResult) -> None:
+        """Atomically mark a published adapter as ready for reuse."""
+        self._result_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._result_path.with_suffix(".tmp")
+        payload = {
+            "model": self._artifact_to_dict(result.model),
+            "adapter": self._artifact_to_dict(result.adapter),
+            "base_model_id": result.base_model_id,
+            "final_eval_loss": result.final_eval_loss,
+            "total_steps": result.total_steps,
+            "best_checkpoint": self._artifact_to_dict(result.best_checkpoint)
+            if result.best_checkpoint else None,
+        }
+        with temporary.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False)
+            file.flush()
+            os.fsync(file.fileno())
+        temporary.replace(self._result_path)
+
+    @staticmethod
+    def _artifact_to_dict(location: ArtifactLocation) -> dict[str, Any]:
+        return {
+            "type": location.type.value,
+            "value": location.value,
+            "version": location.version,
+            "metadata": location.metadata,
+        }
+
+    @staticmethod
+    def _artifact_from_dict(data: dict[str, Any]) -> ArtifactLocation:
+        return ArtifactLocation(
+            type=ArtifactLocationType(data["type"]),
+            value=data["value"],
+            version=data.get("version"),
+            metadata=data.get("metadata", {}),
+        )
 
     @staticmethod
     def _configure_logging(project_dir: Path) -> None:
