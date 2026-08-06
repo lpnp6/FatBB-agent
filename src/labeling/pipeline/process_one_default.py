@@ -1,4 +1,4 @@
-"""Interactively extract structured recipe data with a local Ollama model."""
+"""Extract structured recipe data from one file with a local Ollama model."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=os.environ.get("OLLAMA_MODEL"), required="OLLAMA_MODEL" not in os.environ)
     parser.add_argument("--host", default=os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"))
-    parser.add_argument("--file", type=Path, help="Process one Markdown document and exit")
+    parser.add_argument("--file", required=True, type=Path, help="Markdown document to process")
     return parser.parse_args()
 
 
@@ -50,21 +50,11 @@ async def main() -> None:
         repair_prompt_builder=RecipeRepairPromptBuilder(),
     )
 
-    while True:
-        if args.file:
-            path = args.file
-        else:
-            raw_path = input("Document path (empty to quit): ").strip()
-            if not raw_path:
-                return
-            path = Path(raw_path)
-        try:
-            document = path.expanduser().read_text(encoding="utf-8")
-            print(json.dumps(await process_document(document, client), ensure_ascii=False, indent=2))
-        except (OSError, OutputValidationError, RuntimeError, ValueError) as error:
-            print(f"Error: {error}")
-        if args.file:
-            return
+    try:
+        document = args.file.expanduser().read_text(encoding="utf-8")
+        print(json.dumps(await process_document(document, client), ensure_ascii=False, indent=2))
+    except (OSError, OutputValidationError, RuntimeError, ValueError) as error:
+        print(f"Error: {error}")
 
 
 if __name__ == "__main__":
