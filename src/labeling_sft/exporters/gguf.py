@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 import logging
 import subprocess
 import sys
@@ -13,6 +15,33 @@ from labeling_sft.artifact_store import artifact_store
 from labeling_sft.interfaces.exporter import BaseExporter
 
 logger = logging.getLogger(__name__)
+
+
+def training_result_from_checkpoint(checkpoint: str | Path) -> TrainingResult:
+    """Build a training result from a local PEFT checkpoint directory."""
+    path = Path(checkpoint).expanduser().resolve()
+    config_path = path / "adapter_config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Adapter config not found: {config_path}")
+    if not any((path / name).is_file() for name in ("adapter_model.safetensors", "adapter_model.bin")):
+        raise FileNotFoundError(f"Adapter weights not found in: {path}")
+
+    adapter_config = json.loads(config_path.read_text(encoding="utf-8"))
+    base_model_id = adapter_config.get("base_model_name_or_path")
+    if not isinstance(base_model_id, str) or not base_model_id:
+        raise ValueError(f"Missing base_model_name_or_path in: {config_path}")
+
+    state_path = path / "trainer_state.json"
+    total_steps = 0
+    if state_path.is_file():
+        total_steps = int(json.loads(state_path.read_text(encoding="utf-8")).get("global_step", 0))
+    artifact = ArtifactLocation.local(str(path))
+    return TrainingResult(
+        model=artifact,
+        adapter=artifact,
+        base_model_id=base_model_id,
+        total_steps=total_steps,
+    )
 
 
 class GGUFExporter(BaseExporter):
@@ -110,3 +139,21 @@ class GGUFExporter(BaseExporter):
         if not script.is_file():
             raise FileNotFoundError(f"llama.cpp converter not found after install: {script}")
         return script
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Convert a PEFT checkpoint directory to GGUF")
+    parser.add_argument("--checkpoint", "--checkpoint-dir", dest="checkpoint", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path, help="Output GGUF file")
+    parser.add_argument("--outtype", default="q8_0", help="GGUF quantization type")
+    args = parser.parse_args()
+
+    result = GGUFExporter(args.outtype).export(
+        training_result_from_checkpoint(args.checkpoint),
+        ArtifactLocation.local(str(args.output.expanduser().resolve())),
+    )
+    print(json.dumps({"artifact": result.artifact.value, "size_mb": result.size_mb}))
+
+
+if __name__ == "__main__":
+    main()
