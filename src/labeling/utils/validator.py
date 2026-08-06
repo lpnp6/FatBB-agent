@@ -71,7 +71,22 @@ def _string(value: Any, field: str, *, required: bool = False) -> str | None:
 
 
 class OutputValidator:
-    """Convert one JSON response into the dataclass contract used by the pipeline."""
+    """Convert one JSON response into the dataclass contract used by the pipeline.
+
+    Parameters
+    ----------
+    mode:
+        ``"finetune"`` — strict contract; every missing or mismatched field
+        raises ``OutputValidationError`` so bad data never enters training sets.
+
+        ``"production"`` — lenient contract; common model mistakes are
+        silently corrected so the pipeline produces usable output.
+    """
+
+    def __init__(self, mode: str = "production") -> None:
+        if mode not in {"finetune", "production"}:
+            raise ValueError(f"mode must be 'finetune' or 'production', got {mode!r}")
+        self._mode: str = mode
 
     def parse(self, raw_output: str) -> ParsedLabel:
         try:
@@ -93,20 +108,22 @@ class OutputValidator:
             self._ingredient_relation(_mapping(value, "ingredient_relations[]"))
             for value in _list(payload.get("ingredient_relations"), "ingredient_relations")
         ]
+        dish_relations_default: list[Any] | None = [] if self._mode == "production" else None
         dish_relations = [
             self._dish_relation(_mapping(value, "dish_relations[]"))
-            for value in _list(payload.get("dish_relations", []), "dish_relations")
+            for value in _list(payload.get("dish_relations", dish_relations_default), "dish_relations")
         ]
         ingredient_slugs = {ingredient.name.lower().replace(" ", "-") for ingredient in ingredients}
         for step in dish.cooking_steps:
             unknown = set(step.ingredient_refs) - ingredient_slugs
             if unknown:
-                resolved = _fuzzy_match_refs(unknown, ingredient_slugs)
-                step.ingredient_refs[:] = [resolved.get(r, r) for r in step.ingredient_refs]
-                still_unknown = set(step.ingredient_refs) - ingredient_slugs
-                if still_unknown:
+                if self._mode == "production":
+                    resolved = _fuzzy_match_refs(unknown, ingredient_slugs)
+                    step.ingredient_refs[:] = [resolved.get(r, r) for r in step.ingredient_refs]
+                    unknown = set(step.ingredient_refs) - ingredient_slugs
+                if unknown:
                     raise OutputValidationError(
-                        f"cooking_steps ingredient_refs not found: {sorted(still_unknown)!r}"
+                        f"cooking_steps ingredient_refs not found: {sorted(unknown)!r}"
                     )
         return ParsedLabel(
             output=ExtractionOutput(dish=dish, ingredients=ingredients, ingredient_relations=ingredient_relations, dish_relations=dish_relations),
