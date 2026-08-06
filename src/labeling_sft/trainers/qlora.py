@@ -291,6 +291,7 @@ class QLoRATrainer(BaseTrainer):
             report_to=[],
             seed=self.config.seed,
             resume_from_checkpoint=resume_from,
+            ignore_data_skip=False
         )
 
         # -- Trainer ------------------------------------------------------
