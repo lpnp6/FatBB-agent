@@ -40,7 +40,6 @@ from labeling_sft.configs import QLoRAConfig
 from labeling_sft.dataset_builders import BuildFromFileDatasetBuilder, SqliteLocalBuilder
 from labeling_sft.dataset_loaders import LocalJsonlDatasetLoader
 from labeling_sft.evaluators import QwenEvaluator
-from labeling_sft.exporters import GGUFExporter
 from labeling_sft.orchestrator import PipelineResult, SFTOrchestrator
 from labeling_sft.trainers import QLoRATrainer
 
@@ -77,3 +76,10 @@ __all__ = [
     "PipelineResult",
     "SFTOrchestrator",
 ]
+
+
+def __getattr__(name: str):
+    if name == "GGUFExporter":
+        from labeling_sft.exporters import GGUFExporter
+        return GGUFExporter
+    raise AttributeError(name)
