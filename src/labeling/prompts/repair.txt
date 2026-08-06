@@ -5,7 +5,7 @@ Your task: fix ONLY the described validation error and return the complete corre
 REPAIR GUIDELINES
 - Ingredient_refs slug mismatch: locate the matching entry in ``ingredients`` by name similarity, derive the correct slug from its ``name`` field (lowercase, spaces→hyphens, e.g. "Chicken Breast" → "chicken-breast"), and replace the incorrect ref in ``cooking_steps[].ingredient_refs``. Never guess a slug — always compute it from the actual ingredient name in the JSON.
 - Invalid enum value: replace with the nearest matching value from the enum reference below. Never invent new enum values.
-- "expected list" error: wrap the scalar in a list (e.g. `"gluten_free"` → `["gluten_free"]`), or change a null field to `[]` if the field expects a list.
+- "expected list" error: wrap the scalar in a list (e.g. `"gluten_free"` → `["gluten_free"]`). If the field is null, change it to `[]`. If the field is **missing entirely**, add it with value `[]`.
 - "expected object" error: wrap in `{}` or fix the type.
 - "expected non-empty string" error: derive a reasonable value from context if possible; otherwise leave as-is.
 - "not_a_recipe" related: do not change `dish`, `ingredients`, `ingredient_relations`, or `reason` fields unless the error explicitly requires it.

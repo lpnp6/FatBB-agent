@@ -46,6 +46,22 @@ def _list(value: Any, field: str) -> list[Any]:
     return value
 
 
+def _fuzzy_match_refs(
+    unknown: set[str], slugs: set[str],
+) -> dict[str, str]:
+    """Try to match unknown ingredient_refs to actual ingredient slugs.
+
+    Returns a mapping ``{unknown_ref: matched_slug}`` for refs that could
+    be resolved unambiguously.  Unresolvable refs are omitted.
+    """
+    resolved: dict[str, str] = {}
+    for ref in unknown:
+        candidates = [s for s in slugs if ref in s or s in ref]
+        if len(candidates) == 1:
+            resolved[ref] = candidates[0]
+    return resolved
+
+
 def _string(value: Any, field: str, *, required: bool = False) -> str | None:
     if value is None and not required:
         return None
@@ -79,13 +95,19 @@ class OutputValidator:
         ]
         dish_relations = [
             self._dish_relation(_mapping(value, "dish_relations[]"))
-            for value in _list(payload.get("dish_relations"), "dish_relations")
+            for value in _list(payload.get("dish_relations", []), "dish_relations")
         ]
         ingredient_slugs = {ingredient.name.lower().replace(" ", "-") for ingredient in ingredients}
         for step in dish.cooking_steps:
             unknown = set(step.ingredient_refs) - ingredient_slugs
             if unknown:
-                raise OutputValidationError(f"cooking_steps ingredient_refs not found: {sorted(unknown)!r}")
+                resolved = _fuzzy_match_refs(unknown, ingredient_slugs)
+                step.ingredient_refs[:] = [resolved.get(r, r) for r in step.ingredient_refs]
+                still_unknown = set(step.ingredient_refs) - ingredient_slugs
+                if still_unknown:
+                    raise OutputValidationError(
+                        f"cooking_steps ingredient_refs not found: {sorted(still_unknown)!r}"
+                    )
         return ParsedLabel(
             output=ExtractionOutput(dish=dish, ingredients=ingredients, ingredient_relations=ingredient_relations, dish_relations=dish_relations),
             is_not_a_recipe=False,

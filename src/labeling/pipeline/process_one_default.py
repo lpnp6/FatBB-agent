@@ -14,23 +14,34 @@ from labeling.clients import OllamaLabelingClient
 from labeling.prompts import RecipeLabelingPromptBuilder, RecipeRepairPromptBuilder
 from labeling.utils.validator import OutputValidationError, OutputValidator
 
+MAX_REPAIR_ATTEMPTS = 5
+
 
 async def process_document(
     document: str,
     client: OllamaLabelingClient,
     validator: OutputValidator | None = None,
 ) -> dict[str, Any]:
-    """Label one document, repairing one invalid model response if needed."""
+    """Label one document, looping repair until valid or attempts exhausted."""
     validator = validator or OutputValidator()
     result = await client.label(document)
-    try:
-        return validator.parse(result.raw_output).normalized_json
-    except OutputValidationError as error:
-        print(f"Validator error: {error}", file=sys.stderr)
-        print("Repair: requesting corrected JSON from Ollama...", file=sys.stderr)
-        repaired = await client.repair(result.raw_output, str(error))
-        print(f"Repair response:\n{repaired.raw_output}", file=sys.stderr)
-        return validator.parse(repaired.raw_output).normalized_json
+    raw = result.raw_output
+
+    for attempt in range(MAX_REPAIR_ATTEMPTS + 1):
+        try:
+            parsed = validator.parse(raw).normalized_json
+            print(f"[attempt {attempt + 1}] ✓ valid", file=sys.stderr)
+            return parsed
+        except OutputValidationError as error:
+            print(f"[attempt {attempt + 1}] ✗ {error}", file=sys.stderr)
+            if attempt >= MAX_REPAIR_ATTEMPTS:
+                raise
+            print(f"[attempt {attempt + 1}] → repairing...", file=sys.stderr)
+            result = await client.repair(raw, str(error))
+            raw = result.raw_output
+            print(f"[attempt {attempt + 1}] repair response:\n{raw}", file=sys.stderr)
+
+    raise RuntimeError(f"Failed after {MAX_REPAIR_ATTEMPTS} repair attempts")
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,7 +65,8 @@ async def main() -> None:
         document = args.file.expanduser().read_text(encoding="utf-8")
         print(json.dumps(await process_document(document, client), ensure_ascii=False, indent=2))
     except (OSError, OutputValidationError, RuntimeError, ValueError) as error:
-        print(f"Error: {error}")
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
