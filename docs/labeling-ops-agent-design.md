@@ -84,86 +84,95 @@ The first version should use one supervisor Agent, not multiple autonomous sub-a
 ## 4. State Machine
 
 ```text
-                                      +------------------+
-                                      |   INIT / RESUME  |
-                                      +--------+---------+
-                                               |
-                                               v
-                                      +------------------+
-                                      |  INSPECT_STATE   |
-                                      | load RunState and|
-                                      | recent evidence  |
-                                      +---+-----+-----+--+
-                                          |     |     |
-             no usable labels ------------+     |     +------ candidate model exists
-                                                |                    |
-                                                v                    v
-                                      +----------------+       +-----------+
-                                      | BUILD_DATASET  |       | EVALUATE  |
-                                      +-------+--------+       +-----+-----+
-                                              |                      |
-                                              v                      v
-                                      +----------------+       +-------------+
-                                      | DATASET_CHECK  |       | METRIC_GATE |
-                                      +-------+--------+       +---+-----+---+
-                                              |                    fail   pass
-                                              v                     |      |
-                                      +----------------+           |      v
-                                      |    TRAIN       |           | +----------+
-                                      | checkpointing  |-----------+ | RELEASE  |
-                                      +----------------+             +----+-----+
-                                                                      |    |
-                                                                      |    v
-                                                                      | +------------------------+
-                                                                      | | EXPORT / DEPLOY_CANDIDATE|
-                                                                      | +------------------------+
-                                                                      v
-                                                           +--------------------+
-                                                           |  ERROR_ANALYSIS    |
-                                                           +---------+----------+
+                         +---------------+
+                         | INIT / RESUME |
+                         +-------+-------+
+                                 |
+                                 v
+                         +---------------+
+                         | INSPECT_STATE |
+                         +---------------+
+
+INSPECT_STATE guarded routes:
+
+  no usable accepted labels ------------------------------> PLAN_LABELING
+  usable labels but no valid dataset/candidate -----------> BUILD_DATASET
+  candidate model has no current evaluation --------------> EVALUATE
+  candidate has been exported and registered -------------> DEPLOY_CANDIDATE [final]
+
+Labeling path:
+
+  PLAN_LABELING -- holdout absent --> RESERVE_HOLDOUT -- manifest saved --> BOOTSTRAP_LABEL
+        |
+        +------ holdout exists --------------------------------------------> BOOTSTRAP_LABEL
+
+  BOOTSTRAP_LABEL --> QUALITY_GATE -- pass --------> ACCEPT_LABELS --> INSPECT_STATE
+                                      |
+                                      +-- review --> REVIEW_REQUIRED --> HUMAN_REVIEW
                                                                      |
-          +----------------------------------------------------------+-------------------------+
-          |                              |                                                     |
-          v                              v                                                     v
- prompt coverage issue            label quality issue                                    training issue
- update prompt version            targeted labeling / review                             approved config change
-          |                              |                                                     |
-          +------------------------------+--------------------------+--------------------------+
-                                                                 |
-                                                                 v
-                                                        +------------------+
-                                                        |  PLAN_LABELING   |
-                                                        +--------+---------+
-                                                                 |
-                                                                 v
-                                                        +------------------+
-                                                        | RESERVE_HOLDOUT  |
-                                                        +--------+---------+
-                                                                 |
-                                                                 v
-                                                        +------------------+
-                                                        | BOOTSTRAP_LABEL  |
-                                                        +--------+---------+
-                                                                 |
-                                                                 v
-                                                        +------------------+
-                                                        |  QUALITY_GATE    |
-                                                        +---+----------+---+
-                                                           |          |
-                                                        pass        review/fail
-                                                           |          |
-                                                           v          v
-                                                +----------------+  +------------------+
-                                                | ACCEPT_LABELS  |  | REVIEW_REQUIRED  |
-                                                +-------+--------+  +--------+---------+
-                                                        |                    |
-                                                        +--> BUILD_DATASET    v
-                                                                  HUMAN_REVIEW
-                                                                      |
-                                                           accepted / corrected / rejected
+                                                                     +--> INSPECT_STATE
+
+Dataset, training, and release path:
+
+  BUILD_DATASET --> DATASET_CHECK -- pass --> TRAIN -- candidate artifact --> EVALUATE --> METRIC_GATE
+                         |                      |                                                |
+                         +-- fail --> BLOCKED    +-- training failure --> ERROR_ANALYSIS          +-- pass --> RELEASE
+                              [final]                                                                  |
+                                                                                                       v
+                                                                                         EXPORT / DEPLOY_CANDIDATE [final]
+
+  METRIC_GATE -- fail --> ERROR_ANALYSIS
+
+ERROR_ANALYSIS guarded routes:
+
+  prompt coverage issue ----------------------------------------> PLAN_LABELING
+  label quality issue ------------------------------------------> REVIEW_REQUIRED or PLAN_LABELING
+  training issue, approved configuration change ----------------> TRAIN
+  no safe remediation ------------------------------------------> BLOCKED [final]
+
+Any non-final state -- explicit user cancellation -------------> CANCELLED [final]
 ```
 
+`INSPECT_STATE` routes only from persisted facts: label availability, dataset and candidate availability, evaluation freshness, and export status. A user cancellation transitions to the final `CANCELLED` state from any non-final state.
+
 The state machine must include terminal failure states such as `BLOCKED` and `CANCELLED`, rather than retrying indefinitely.
+
+### 4.1 Transition Table
+
+The diagram is illustrative; this table is authoritative. Each row is a single legal transition.
+
+| From state | Guard / event | To state |
+|---|---|---|
+| `INIT / RESUME` | State loaded or created | `INSPECT_STATE` |
+| `INSPECT_STATE` | No usable accepted labels | `PLAN_LABELING` |
+| `INSPECT_STATE` | Usable labels, no frozen dataset or candidate model | `BUILD_DATASET` |
+| `INSPECT_STATE` | Candidate model exists and has no current evaluation | `EVALUATE` |
+| `INSPECT_STATE` | Candidate passed release and was exported | `DEPLOY_CANDIDATE` |
+| `PLAN_LABELING` | Holdout has not been reserved | `RESERVE_HOLDOUT` |
+| `PLAN_LABELING` | Holdout already exists | `BOOTSTRAP_LABEL` |
+| `RESERVE_HOLDOUT` | Holdout manifest persisted | `BOOTSTRAP_LABEL` |
+| `BOOTSTRAP_LABEL` | Batch finishes | `QUALITY_GATE` |
+| `QUALITY_GATE` | Quality policy passes | `ACCEPT_LABELS` |
+| `QUALITY_GATE` | Review policy requires intervention | `REVIEW_REQUIRED` |
+| `ACCEPT_LABELS` | Labels and provenance are persisted | `INSPECT_STATE` |
+| `REVIEW_REQUIRED` | Review tasks created | `HUMAN_REVIEW` |
+| `HUMAN_REVIEW` | Accepted or corrected review records persisted | `INSPECT_STATE` |
+| `HUMAN_REVIEW` | Review records are rejected but the remaining accepted dataset is still viable | `INSPECT_STATE` |
+| `HUMAN_REVIEW` | Review cannot be completed and policy requires intervention | `BLOCKED` |
+| `BUILD_DATASET` | Dataset split created | `DATASET_CHECK` |
+| `DATASET_CHECK` | Deterministic checks pass | `TRAIN` |
+| `DATASET_CHECK` | Deterministic checks fail | `BLOCKED` |
+| `TRAIN` | Candidate artifact produced | `EVALUATE` |
+| `TRAIN` | Training cannot resume or fails | `ERROR_ANALYSIS` |
+| `EVALUATE` | Evaluation report persisted | `METRIC_GATE` |
+| `METRIC_GATE` | All release metrics pass | `RELEASE` |
+| `METRIC_GATE` | At least one release metric fails | `ERROR_ANALYSIS` |
+| `ERROR_ANALYSIS` | Prompt coverage issue | `PLAN_LABELING` |
+| `ERROR_ANALYSIS` | Label quality issue | `REVIEW_REQUIRED` or `PLAN_LABELING` |
+| `ERROR_ANALYSIS` | Approved training configuration change | `TRAIN` |
+| `ERROR_ANALYSIS` | No safe remediation exists | `BLOCKED` |
+| `RELEASE` | Human approval exists | `EXPORT / DEPLOY_CANDIDATE` |
+| Any non-final state | Explicit user cancellation | `CANCELLED` |
 
 ## 5. State Definitions and Output Functions
 
@@ -276,21 +285,21 @@ Paid API calls, major training runs, and model release require a pending approva
 
 ```text
 src/labeling_ops/
-├── agent.py            # state-specific LLM calls and structured recommendations
-├── controller.py       # StateFlow loop, output execution, and transition enforcement
-├── contracts.py        # RunState, Event, State, Decision, MetricGate, ArtifactRecord
-├── state_store.py      # SQLite state and append-only event history
-├── policies.py         # versioned thresholds, transition rules, approvals, loop limits
-├── prompts/
-│   ├── inspect_state.txt
-│   └── error_analysis.txt
-├── tools/
-│   ├── labeling.py     # BootstrapOrchestrator adapter
-│   ├── dataset.py      # dataset builder adapter
-│   ├── training.py     # SFTOrchestrator or trainer adapter
-│   ├── evaluation.py   # QwenEvaluator adapter
-│   └── review.py       # review task adapter
-└── run.py              # CLI/API composition root
+|-- agent.py            # state-specific LLM calls and structured recommendations
+|-- controller.py       # StateFlow loop, output execution, and transition enforcement
+|-- contracts.py        # RunState, Event, State, Decision, MetricGate, ArtifactRecord
+|-- state_store.py      # SQLite state and append-only event history
+|-- policies.py         # versioned thresholds, transition rules, approvals, loop limits
+|-- prompts/
+|   |-- inspect_state.txt
+|   `-- error_analysis.txt
+|-- tools/
+|   |-- labeling.py     # BootstrapOrchestrator adapter
+|   |-- dataset.py      # dataset builder adapter
+|   |-- training.py     # SFTOrchestrator or trainer adapter
+|   |-- evaluation.py   # QwenEvaluator adapter
+|   `-- review.py       # review task adapter
+`-- run.py              # CLI/API composition root
 ```
 
 The `controller.py` loop follows the StateFlow algorithm at an implementation level:
