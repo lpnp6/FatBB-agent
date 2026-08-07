@@ -1,26 +1,48 @@
-# LabelingOpsAgent Design — End-to-End Labeling and SFT Orchestration
+# LabelingOpsAgent Design - A StateFlow-Inspired Orchestration Workflow
 
 > **Status**: Proposal. Not implemented.
-> **Target**: Add a recoverable, auditable, policy-constrained Agent orchestration layer above the existing `labeling` and `labeling_sft` workflows.
+> **Primary reference**: Wu et al., *StateFlow: Enhancing LLM Task-Solving through State-Driven Workflows*, COLM 2024, [arXiv:2403.11322v5](https://arxiv.org/abs/2403.11322).
+> **Target**: Add a recoverable, auditable, policy-constrained orchestration layer above the existing `labeling` and `labeling_sft` workflows.
 
-## 1. Problem and Scope
+## 1. Problem
 
-The repository already provides two deterministic workflows:
+The repository already contains deterministic components for individual phases:
 
-- `labeling.bootstrap.BootstrapOrchestrator`: discovery, deduplication, labeling, validation, repair, and persistence.
-- `labeling_sft.SFTOrchestrator`: dataset construction, training, and export.
+- `labeling.bootstrap.BootstrapOrchestrator` discovers, deduplicates, labels, validates, repairs, and persists records.
+- `labeling_sft.SFTOrchestrator` builds a dataset, trains a model, and exports an artifact.
+- `QwenEvaluator` evaluates a trained model.
 
-What is missing is the cross-workflow control loop: use the number and quality of labels, outstanding reviews, training artifacts, and evaluation metrics to decide whether to collect more labels, train, review data, or release a candidate model.
+The missing piece is a cross-phase control loop. It must use label quality, review backlog, dataset versions, training artifacts, and evaluation outcomes to decide whether to collect more labels, perform review, train, evaluate, or release a candidate model.
 
-`LabelingOpsAgent` is responsible for **planning and explaining the next step**. It must not directly perform labeling, training, or release operations. Deterministic code remains responsible for execution, data consistency, and hard policy gates.
+This is a poor fit for one long prompt that asks an LLM to remember every workflow step. The model can lose track of progress, repeat actions, and make transitions that are difficult to audit. Instead, the system should model the workflow explicitly as a state machine, following the StateFlow separation between **process grounding** and **sub-task solving**.
 
-## 2. Core Principles
+## 2. StateFlow Mapping
 
-1. **External state, not model memory**: the LLM has no persistent workflow memory. Every decision is based on durable `RunState`, reports, and policy.
-2. **Agent decides; Controller executes**: the Agent can propose only allow-listed actions. `WorkflowController` validates preconditions, executes tools, and persists results.
-3. **Hard gates cannot be bypassed**: for example, a model cannot be released without a passing evaluation report, and training cannot start from an unfrozen dataset.
-4. **Side effects require approval**: paid API labeling, substantial training runs, and release or replacement of a production candidate require explicit human approval.
-5. **Full provenance**: every exported model must be traceable to a label snapshot, prompt version, training configuration, evaluation report, and approval record.
+StateFlow represents an LLM workflow as:
+
+```text
+<S, s0, F, delta, Gamma, Omega>
+```
+
+For LabelingOpsAgent:
+
+| StateFlow element | LabelingOpsAgent meaning |
+|---|---|
+| `S` | Finite set of workflow states, such as `LABEL`, `REVIEW`, `TRAIN`, and `EVALUATE` |
+| `s0` | `INIT` or a resumed persisted state |
+| `F` | `DEPLOY_CANDIDATE`, `CANCELLED`, or `BLOCKED` |
+| `delta` | Transition function based on durable state, tool observations, policy gates, and, only when necessary, an LLM decision |
+| `Gamma` | Append-only execution history: user request, state prompts, Agent outputs, tool results, approvals, metrics, and errors |
+| `Omega` | Output functions: prompt builders, LLM calls, deterministic checks, and calls to existing labeling/SFT tools |
+
+The key distinction is:
+
+```text
+Process grounding:  state + transition rules + durable RunState
+Sub-task solving:   state-specific prompt + LLM reasoning + tool execution
+```
+
+The LLM therefore does not own the workflow. It solves a focused sub-task after the Controller has entered a state; the Controller owns progress, permissions, and persistence.
 
 ## 3. Architecture
 
@@ -29,122 +51,192 @@ User request / scheduled trigger
               |
               v
     +-----------------------+
-    |    LabelingOpsAgent   |
-    | plan, analyze, explain|
+    |  StateFlow Controller |
+    | current state + delta  |
     +-----------+-----------+
-                | allowed action proposal
+                |
+                | enter state and run its output functions (Omega)
                 v
     +-----------------------+
-    |  WorkflowController   |
-    | policy / approval gate|
+    |    LabelingOpsAgent   |
+    | state-specific prompt |
+    | plan / analyze / route|
     +-----------+-----------+
                 |
-     +----------+----------+-----------+-----------+
-     v                     v           v           v
- BootstrapOrchestrator  DatasetBuilder Trainer   Evaluator / Exporter
-       (labeling)      (labeling_sft)  (SFT)       (labeling_sft)
-                |
                 v
-        RunState + artifact / metric records
+    +-----------------------+
+    |  Controlled tool set  |
+    +----+--------+----+----+
+         |        |    |
+         v        v    v
+   labeling     SFT    evaluator / exporter
+         |        |    |
+         +--------+----+
+                  |
+                  v
+      RunState + append-only event history (Gamma)
 ```
 
-The first version should not introduce multiple autonomous sub-agents. A single supervisor Agent with controlled tools is easier to test, cheaper to operate, and better suited to an auditable training workflow.
+`LabelingOpsAgent` may propose an action only from the currently allowed actions. `WorkflowController` validates preconditions, approvals, and state version before executing it.
 
-## 4. Complete State Machine
+The first version should use one supervisor Agent, not multiple autonomous sub-agents. State-specific prompts provide the specialization described by StateFlow without adding coordination overhead.
+
+## 4. State Machine
 
 ```text
- +------------------+
- |   IDLE / INIT    |  create or resume RunState
- +---------+--------+
-           |
-           v
- +------------------+
- |  INSPECT_STATE   |  labels / datasets / models / metrics
- +----+--------+----+
-      |        |                 \
-      |        |                  \ existing candidate model
-      |        |                   v
-      |        |              +----------+
-      |        |              | EVALUATE |
-      |        |              +----+-----+
-      |        |                   |
-      |        v                   |
-      |   +---------------+        |
-      |   | BUILD_DATASET |        |
-      |   +-------+-------+        |
-      |           |                |
-      |           v                |
-      |   +---------------+        |
-      |   | DATASET_CHECK |        |
-      |   +-------+-------+        |
-      |           |                |
-      |           v                |
-      |   +---------------+        |
-      |   |     TRAIN     |--------+
-      |   | checkpointing |        |
-      |   +---------------+        |
-      |                            v
-      |                     +--------------+
-      |                     | METRIC_GATE  |
-      |                     +--+--------+--+
-      |                        |        |
-      |                     fail      pass
-      |                        |        |
-      |                        v        v
-      |               +---------------+  +---------+
-      |               | ERROR_ANALYSIS|  | RELEASE |
-      |               +-------+-------+  +----+----+
-      |                       |               |
-      |                       +----+          v
-      |                            |   +--------------------------+
-      |                            +-->| EXPORT / DEPLOY_CANDIDATE|
-      |                                +--------------------------+
-      v
- +------------------+
- |  PLAN_LABELING   |
- +---------+--------+
-           |
-           v
- +------------------+
- | RESERVE_HOLDOUT  |  deduplicated holdout before training
- +---------+--------+
-           |
-           v
- +------------------+
- | BOOTSTRAP_LABEL  |  label, validate, repair, persist
- +---------+--------+
-           |
-           v
- +------------------+
- |   QUALITY_GATE   |
- +----+--------+----+
-      |        |
-   pass      review / fail
-      |        |
-      v        v
- +---------------+  +------------------+
- | ACCEPT_LABELS |  | REVIEW_REQUIRED  |
- +-------+-------+  +--------+---------+
-         |                   |
-         +--> BUILD_DATASET  +--> HUMAN_REVIEW --> ACCEPT_LABELS / REJECT_LABEL
+                                      +------------------+
+                                      |   INIT / RESUME  |
+                                      +--------+---------+
+                                               |
+                                               v
+                                      +------------------+
+                                      |  INSPECT_STATE   |
+                                      | load RunState and|
+                                      | recent evidence  |
+                                      +---+-----+-----+--+
+                                          |     |     |
+             no usable labels ------------+     |     +------ candidate model exists
+                                                |                    |
+                                                v                    v
+                                      +----------------+       +-----------+
+                                      | BUILD_DATASET  |       | EVALUATE  |
+                                      +-------+--------+       +-----+-----+
+                                              |                      |
+                                              v                      v
+                                      +----------------+       +-------------+
+                                      | DATASET_CHECK  |       | METRIC_GATE |
+                                      +-------+--------+       +---+-----+---+
+                                              |                    fail   pass
+                                              v                     |      |
+                                      +----------------+           |      v
+                                      |    TRAIN       |           | +----------+
+                                      | checkpointing  |-----------+ | RELEASE  |
+                                      +----------------+             +----+-----+
+                                                                      |    |
+                                                                      |    v
+                                                                      | +------------------------+
+                                                                      | | EXPORT / DEPLOY_CANDIDATE|
+                                                                      | +------------------------+
+                                                                      v
+                                                           +--------------------+
+                                                           |  ERROR_ANALYSIS    |
+                                                           +---------+----------+
+                                                                     |
+          +----------------------------------------------------------+-------------------------+
+          |                              |                                                     |
+          v                              v                                                     v
+ prompt coverage issue            label quality issue                                    training issue
+ update prompt version            targeted labeling / review                             approved config change
+          |                              |                                                     |
+          +------------------------------+--------------------------+--------------------------+
+                                                                 |
+                                                                 v
+                                                        +------------------+
+                                                        |  PLAN_LABELING   |
+                                                        +--------+---------+
+                                                                 |
+                                                                 v
+                                                        +------------------+
+                                                        | RESERVE_HOLDOUT  |
+                                                        +--------+---------+
+                                                                 |
+                                                                 v
+                                                        +------------------+
+                                                        | BOOTSTRAP_LABEL  |
+                                                        +--------+---------+
+                                                                 |
+                                                                 v
+                                                        +------------------+
+                                                        |  QUALITY_GATE    |
+                                                        +---+----------+---+
+                                                           |          |
+                                                        pass        review/fail
+                                                           |          |
+                                                           v          v
+                                                +----------------+  +------------------+
+                                                | ACCEPT_LABELS  |  | REVIEW_REQUIRED  |
+                                                +-------+--------+  +--------+---------+
+                                                        |                    |
+                                                        +--> BUILD_DATASET    v
+                                                                  HUMAN_REVIEW
+                                                                      |
+                                                           accepted / corrected / rejected
 ```
 
-`ERROR_ANALYSIS` can return the workflow to different states according to the error category:
+The state machine must include terminal failure states such as `BLOCKED` and `CANCELLED`, rather than retrying indefinitely.
+
+## 5. State Definitions and Output Functions
+
+Each state has a small, explicit sequence of output functions. In StateFlow terms, an output function may be a prompt function, LLM call, deterministic validator, or external tool call. Tool output is appended to the event history before `delta` selects the next state.
+
+| State | State-specific objective | Output functions | Primary transition evidence |
+|---|---|---|---|
+| `INSPECT_STATE` | Establish the current run position | load `RunState`; load latest artifacts and metrics; summarize for Agent | persisted phase and artifact availability |
+| `PLAN_LABELING` | Select a bounded labeling batch | Agent proposes target and sampling strategy; approval check | target approved; budget available |
+| `RESERVE_HOLDOUT` | Isolate unseen evaluation data | deduplicate and reserve holdout | holdout manifest is durable |
+| `BOOTSTRAP_LABEL` | Produce validated label records | call `BootstrapOrchestrator`; persist checkpoint and records | batch result, errors, and accepted count |
+| `QUALITY_GATE` | Decide if labels are usable | deterministic quality metrics; optional Agent diagnosis | validity, confidence, coverage, review backlog |
+| `REVIEW_REQUIRED` | Create review work | select low-confidence or inconsistent records | review tasks durable |
+| `HUMAN_REVIEW` | Resolve quality-sensitive records | await human decision; persist correction or rejection | review decision |
+| `BUILD_DATASET` | Freeze a reproducible training input | snapshot accepted labels; build train/validation split | snapshot ID and split statistics |
+| `DATASET_CHECK` | Block invalid training inputs | deterministic schema and split checks | pass/fail report |
+| `TRAIN` | Produce a checkpointed candidate | call `SFTOrchestrator` or trainer | training result and artifact locations |
+| `EVALUATE` | Measure generalization | call `QwenEvaluator` on holdout and regression sets | evaluation report |
+| `METRIC_GATE` | Apply release policy | deterministic threshold checks | named metric values and policy version |
+| `ERROR_ANALYSIS` | Propose a bounded remediation path | Agent classifies evidence; Controller validates proposal | categorized failure report |
+| `RELEASE` | Authorize candidate creation | verify gate; require human approval | approval record |
+| `EXPORT / DEPLOY_CANDIDATE` | Create a traceable deployable artifact | export GGUF; register candidate metadata | artifact checksum and provenance |
+
+## 6. Transition Design
+
+StateFlow describes two useful transition styles. Both apply here.
+
+### 6.1 Deterministic transitions are the default
+
+Use structured tool results and policy checks whenever possible. Examples:
 
 ```text
-prompt coverage issue  -> update prompt version -> PLAN_LABELING
-low-quality labels     -> targeted labeling + HUMAN_REVIEW
-training issue         -> change approved training config -> BUILD_DATASET / TRAIN
+BOOTSTRAP_LABEL -> QUALITY_GATE
+    when BootstrapOrchestrator returns a completed batch.
+
+QUALITY_GATE -> REVIEW_REQUIRED
+    when low-confidence ratio exceeds its configured threshold.
+
+METRIC_GATE -> RELEASE
+    only when every required metric passes and an approval exists.
+
+METRIC_GATE -> ERROR_ANALYSIS
+    when any release metric fails.
 ```
 
-## 5. State and Policy
+These transitions are auditable and cannot be overridden by a persuasive model response.
 
-`RunState` is the single source of truth for workflow runtime state. It should be stored in SQLite (recommended) or atomically written JSON. The model restores context from this state rather than relying on conversation history.
+### 6.2 LLM-routed transitions are an exception
+
+Use an LLM only when evidence is semantically ambiguous, primarily in `ERROR_ANALYSIS`. The Agent may classify a failure as prompt coverage, label quality, training configuration, or an unknown category. It must return structured JSON with evidence references and one proposed allowed action. The Controller then validates the action against policy.
+
+```json
+{
+  "category": "label_quality",
+  "evidence": ["eval-014: ingredient_refs mismatch", "review-backlog: 12"],
+  "proposed_action": "create_review_tasks",
+  "reason": "Validation failures cluster around labels that were not manually reviewed."
+}
+```
+
+## 7. Persistent State and History
+
+StateFlow treats the state plus cumulative context history as a snapshot of a running workflow. For this system, do not reconstruct that snapshot from chat history alone. Persist two complementary records.
+
+### 7.1 `RunState`: compact operational truth
+
+Store this in SQLite (recommended) and update it transactionally after every successful transition.
 
 ```json
 {
   "run_id": "recipe-labeling-v1",
-  "phase": "evaluate",
+  "state": "evaluate",
+  "state_version": 42,
   "dataset_version": "dataset-20260807-03",
   "prompt_version": "recipe-prompt-04",
   "accepted_labels": 516,
@@ -155,70 +247,88 @@ training issue         -> change approved training config -> BUILD_DATASET / TRA
     "holdout_schema_validity": 0.94,
     "field_f1": 0.79
   },
-  "next_allowed_actions": ["review_errors", "plan_targeted_labeling"]
+  "next_allowed_actions": ["review_errors", "plan_targeted_labeling"],
+  "transition_count": 9,
+  "max_transition_count": 20
 }
 ```
 
-Initial policy gates should be configurable rather than hard-coded:
+### 7.2 `EventHistory`: append-only evidence
+
+Store one immutable record per prompt, tool invocation, output, approval, error, and transition. Retain references to large documents instead of injecting their full content into every LLM prompt. State-specific prompt builders should assemble only the relevant evidence, keeping context focused and controlling token cost.
+
+`max_transition_count` is a StateFlow-style loop guard. Exceeding it transitions the run to `BLOCKED` and creates a human intervention task.
+
+## 8. Policies and Non-Bypassable Gates
+
+All thresholds must be versioned configuration, not prose embedded in prompts.
 
 | Gate | Required condition | Failure action |
 |---|---|---|
-| `QUALITY_GATE` | Label validity rate, low-confidence ratio, and minimum accepted label count meet requirements | Review or targeted labeling |
-| `DATASET_CHECK` | Label snapshot is frozen; train and validation splits are non-empty and reproducible | Repair the dataset |
-| `METRIC_GATE` | Holdout schema validity, field F1, and other release metrics meet thresholds | Analyze errors and loop back |
-| `RELEASE` | `METRIC_GATE` passes and a human approval record exists | Export and register a candidate model |
+| `QUALITY_GATE` | Label validity rate, low-confidence ratio, coverage, and accepted-label count meet requirements | Review or targeted labeling |
+| `DATASET_CHECK` | Label snapshot is frozen; train and validation sets are non-empty and reproducible | Repair the dataset |
+| `METRIC_GATE` | Holdout schema validity, field F1, and other release metrics meet thresholds | Error analysis and controlled loopback |
+| `RELEASE` | `METRIC_GATE` passes and an approval record exists | Export and register a candidate |
 
-## 6. Proposed Package Structure
+Paid API calls, major training runs, and model release require a pending approval state. This separates an Agent's recommendation from an authorized side effect.
+
+## 9. Package Structure
 
 ```text
 src/labeling_ops/
-├── agent.py            # LLM planner: reads state and proposes allowed actions
-├── controller.py       # executes approved actions and enforces policy
-├── contracts.py        # RunState, Task, Decision, MetricGate, ArtifactRecord
-├── state_store.py      # SQLite-backed durable state and audit history
-├── policies.py         # transitions, thresholds, approval requirements
-├── run.py              # CLI/API composition root
-└── tools/
-    ├── labeling.py     # calls BootstrapOrchestrator
-    ├── dataset.py      # calls a dataset builder
-    ├── training.py     # calls SFTOrchestrator or a trainer
-    ├── evaluation.py   # calls QwenEvaluator
-    └── review.py       # creates and resolves review tasks
+├── agent.py            # state-specific LLM calls and structured recommendations
+├── controller.py       # StateFlow loop, output execution, and transition enforcement
+├── contracts.py        # RunState, Event, State, Decision, MetricGate, ArtifactRecord
+├── state_store.py      # SQLite state and append-only event history
+├── policies.py         # versioned thresholds, transition rules, approvals, loop limits
+├── prompts/
+│   ├── inspect_state.txt
+│   └── error_analysis.txt
+├── tools/
+│   ├── labeling.py     # BootstrapOrchestrator adapter
+│   ├── dataset.py      # dataset builder adapter
+│   ├── training.py     # SFTOrchestrator or trainer adapter
+│   ├── evaluation.py   # QwenEvaluator adapter
+│   └── review.py       # review task adapter
+└── run.py              # CLI/API composition root
 ```
 
-## 7. Agent Tool Contract
-
-The Agent receives a compact state summary, the applicable policy, and a set of tool schemas. It returns a structured action proposal and never receives raw shell access.
+The `controller.py` loop follows the StateFlow algorithm at an implementation level:
 
 ```text
-inspect_state(run_id)
-plan_labeling(run_id, target, sampling_strategy)
-run_bootstrap_labeling(run_id, target, model_backend)
-create_review_tasks(run_id, filter)
-build_dataset(run_id, label_snapshot)
-train(run_id, config_version)
-evaluate(run_id, model_artifact, holdout_version)
-export_candidate(run_id, model_artifact, export_format)
+state = load_or_create_run_state()
+while state not in FINAL_STATES and state.transition_count < policy.max_transitions:
+    events = execute_output_functions(state)
+    append_events(events)
+    state = transition(state, events, policy)
+    persist(state)
 ```
 
-The Controller rejects an action when it is absent from `next_allowed_actions`, violates a policy gate, lacks an approval record, or does not match the current `RunState` version.
+## 10. Relationship to Training and Reinforcement Learning
 
-## 8. Why Reinforcement Learning Is Not Needed Initially
+The labeling SFT model and the orchestration Agent solve different problems:
 
-The task sequence is a constrained workflow, not a skill that the LLM must memorize. Its reliable implementation is persistent state, deterministic transition rules, and controlled tool execution.
+| Component | Learns or controls |
+|---|---|
+| Labeling SFT model | Recipe Markdown -> structured JSON extraction |
+| StateFlow Controller | Valid phase progression, recovery, policy gates, and tool execution |
+| LabelingOpsAgent | Focused planning and error diagnosis within the current state |
 
-SFT remains responsible for teaching the labeling model to extract recipe JSON. Reinforcement learning can be considered later only after enough historical trajectories exist:
+Reinforcement learning is not required for the initial orchestration implementation. The primary reliability mechanism is the state machine plus persistent evidence and controlled tools.
+
+StateFlow is compatible with iterative refinement. Once the system has accumulated auditable trajectories,
 
 ```text
-state -> agent decision -> executed action -> evaluation / cost / review outcome
+state -> action proposal -> tool result -> metric / cost / review outcome
 ```
 
-Those records could eventually optimize targeted sampling strategies or training configuration choices. They are not required to implement safe, resumable orchestration.
+the team can analyze recurring failure states, refine state prompts, add or split states, and later evaluate learning-based routing or targeted sampling. Any such optimization must remain downstream of the deterministic policy gates.
 
-## 9. Phase-One Acceptance Criteria
+## 11. Phase-One Acceptance Criteria
 
-1. A request such as “train a releasable recipe labeling model” creates a persisted plan.
-2. Restarting at any phase resumes safely without duplicate labeling or duplicate training.
-3. An evaluation failure cannot produce an export; it must create an auditable remediation plan.
-4. Every exported GGUF traces to a label snapshot, prompt version, training configuration, and evaluation report.
-5. Paid labeling, substantial training, and release require explicit approval.
+1. A request such as "train a releasable recipe labeling model" creates a durable `RunState` and event history.
+2. Every state runs only its declared output functions and can resume safely after interruption.
+3. The Controller rejects an action that is not valid for the current state or lacks required approval.
+4. The workflow stops in `BLOCKED` after the configured transition limit instead of looping indefinitely.
+5. Evaluation failure cannot produce an export; it creates an evidence-backed remediation path.
+6. Every exported GGUF traces to a label snapshot, prompt version, training configuration, evaluation report, policy version, and approval record.
