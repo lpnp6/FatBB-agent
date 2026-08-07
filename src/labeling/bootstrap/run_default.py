@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from labeling.utils.validator import OutputValidator
+
 from ..checkpoint.file_store import FileCheckpointStore
 from ..clients.openai_client import OpenAILabelingClient
 from ..dedup.simhash_store import SimHashDedupStore
@@ -17,6 +19,7 @@ from ..prompts import RecipeLabelingPromptBuilder, RecipeRepairPromptBuilder
 from ..sampling.sampler import Sampler
 from ..utils.uri_resolver import FileSystemURIResolver
 from .orchestrator import BootstrapOrchestrator
+from ..utils.validator import OutputValidationError, OutputValidator
 
 DEFAULT_DEDUP_DB = Path("src/labeling/dedup/dedup_store_bootstrap.sqlite")
 
@@ -95,6 +98,7 @@ async def run_default(
             sampler=sampler,
             checkpoint=checkpoint,
             retries=retries,
+            validator=OutputValidator(mode="finetune")
         )
         return await orchestrator.run(source_dir, target)
     finally:
