@@ -275,8 +275,8 @@ def _score_records(records: list[tuple[dict[str, Any], dict[str, Any], bool, boo
     }
 
 
-class QwenEvaluator(BaseEvaluator):
-    """Evaluate a Qwen QLoRA adapter with deterministic recipe metrics."""
+class OllamaEvaluator(BaseEvaluator):
+    """Evaluate an Ollama model with deterministic recipe metrics."""
 
     def __init__(
         self,
@@ -299,37 +299,7 @@ class QwenEvaluator(BaseEvaluator):
         local_files_only: bool = False,
         **kwargs: Any,
     ) -> tuple[Any, Any]:
-        """Load the 4-bit base model and optional LoRA adapter."""
-        import torch
-        from peft import PeftModel
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-
-        started = time.perf_counter()
-        logger.info("Loading base model %s", training.base_model_id)
-        compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        quantization = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=compute_dtype,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-        )
-        tokenizer = AutoTokenizer.from_pretrained(
-            training.base_model_id, trust_remote_code=True, local_files_only=local_files_only,
-        )
-        tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
-        model = AutoModelForCausalLM.from_pretrained(
-            training.base_model_id,
-            quantization_config=quantization,
-            device_map="auto",
-            trust_remote_code=True,
-            local_files_only=local_files_only,
-        )
-        if include_adapter:
-            logger.info("Loading LoRA adapter from %s", training.adapter.value)
-            model = PeftModel.from_pretrained(model, self._local_artifact_path(training.adapter, "adapter"))
-        model.eval()
-        logger.info("Loaded model include_adapter=%s in %.2fs", include_adapter, time.perf_counter() - started)
-        return model, tokenizer
+        raise NotImplementedError("OllamaEvaluator sends requests to an Ollama server instead of loading a model")
 
     def evaluate(
         self,
@@ -402,17 +372,18 @@ class QwenEvaluator(BaseEvaluator):
         )
         return metrics
 
-    @staticmethod
-    def _evaluation_directory(training: TrainingResult, work_dir: str | Path) -> Path:
+    def _evaluation_directory(self, training: TrainingResult, work_dir: str | Path) -> Path:
         if training.adapter.type is not ArtifactLocationType.LOCAL_PATH:
             raise NotImplementedError("work_dir evaluation requires a local adapter")
         root = Path(work_dir).expanduser().resolve()
         adapter = Path(training.adapter.value).expanduser().resolve()
-        return root / "evaluation" if adapter == root else root / "evaluation" / adapter.name
+        parent = root / "evaluation" if adapter == root else root / "evaluation" / adapter.name
+        model_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", self._ollama_model).strip("._-")
+        return parent / model_name
 
     @staticmethod
     def _load_records(dataset: DatasetSplit, max_samples: int | None) -> list[dict[str, Any]]:
-        path = QwenEvaluator._local_data_path(dataset.val, "validation split")
+        path = OllamaEvaluator._local_data_path(dataset.val, "validation split")
         started = time.perf_counter()
         logger.info("Reading validation dataset from %s", path)
         with path.open(encoding="utf-8") as stream:
@@ -446,9 +417,9 @@ class QwenEvaluator(BaseEvaluator):
                     started = time.perf_counter()
                     raw_output = self._generate_one(None, None, prompt)
                     logger.info("Generated sample %d/%d in %.2fs", index + 1, len(records), time.perf_counter() - started)
-                    prediction = QwenEvaluator._prediction_record(index, raw_output)
+                    prediction = OllamaEvaluator._prediction_record(index, raw_output)
                     if prediction_path:
-                        QwenEvaluator._append_prediction(prediction_path, prediction)
+                        OllamaEvaluator._append_prediction(prediction_path, prediction)
                     progress.update()
                 scored.append((gold, prediction["prediction"], prediction["json_valid"], prediction["schema_valid"]))
                 predictions.append(prediction)
@@ -523,8 +494,8 @@ class QwenEvaluator(BaseEvaluator):
             os.fsync(stream.fileno())
         logger.info("Checkpointed sample %d to %s in %.2fs", prediction["index"] + 1, path, time.perf_counter() - started)
 
-    @staticmethod
     def _prepare_checkpoint(
+        self,
         training: TrainingResult,
         dataset: DatasetSplit,
         work_dir: str | Path | None,
@@ -540,20 +511,23 @@ class QwenEvaluator(BaseEvaluator):
 
         root = Path(work_dir).expanduser().resolve()
         adapter = Path(training.adapter.value).expanduser().resolve()
-        data_path = QwenEvaluator._local_data_path(dataset.val, "validation split").resolve()
-        directory = QwenEvaluator._evaluation_directory(training, root)
+        data_path = OllamaEvaluator._local_data_path(dataset.val, "validation split").resolve()
+        directory = self._evaluation_directory(training, root)
         manifest_path = directory / "manifest.json"
         predictions_path = directory / "predictions.jsonl"
         started = time.perf_counter()
         logger.info("Fingerprinting dataset and adapter for %s", directory)
         manifest = {
-            "version": 1,
+            "version": 2,
             "status": "running",
             "dataset_path": str(data_path),
             "dataset_sha256": _sha256(data_path),
             "adapter_path": str(adapter),
             "adapter_sha256": _adapter_sha256(adapter),
             "base_model_id": training.base_model_id,
+            "ollama_model": self._ollama_model,
+            "ollama_host": self._ollama_host,
+            "ollama_options": {"temperature": 0, "num_ctx": 8192, "num_predict": 4096},
             "max_samples": max_samples,
         }
         logger.info("Fingerprinting completed in %.2fs", time.perf_counter() - started)
@@ -599,20 +573,20 @@ class QwenEvaluator(BaseEvaluator):
     @staticmethod
     def _local_data_path(location: DataLocation, name: str) -> Path:
         if location.type is not DataLocationType.LOCAL_PATH:
-            raise NotImplementedError(f"QwenEvaluator only supports local JSONL; {name} uses {location.type.value}")
+            raise NotImplementedError(f"OllamaEvaluator only supports local JSONL; {name} uses {location.type.value}")
         return Path(location.value)
 
     @staticmethod
     def _local_artifact_path(location: ArtifactLocation, name: str) -> Path:
         if location.type is not ArtifactLocationType.LOCAL_PATH:
-            raise NotImplementedError(f"QwenEvaluator only supports local artifacts; {name} uses {location.type.value}")
+            raise NotImplementedError(f"OllamaEvaluator only supports local artifacts; {name} uses {location.type.value}")
         return Path(location.value)
 
     @staticmethod
     def _write_report(metrics: dict[str, Any], target: ArtifactLocation | None) -> None:
         if not target:
             return
-        path = QwenEvaluator._local_artifact_path(target, "report_target")
+        path = OllamaEvaluator._local_artifact_path(target, "report_target")
         started = time.perf_counter()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -665,7 +639,7 @@ if __name__ == "__main__":
         base_model_id=args.base_model_id,
     )
     dataset = DatasetSplit(DataLocation.local(str(val_file)), DataLocation.local(str(val_file)))
-    evaluator = QwenEvaluator(args.base_model_id, args.ollama_model, args.ollama_host)
+    evaluator = OllamaEvaluator(args.base_model_id, args.ollama_model, args.ollama_host)
     if args.compare_base:
         if args.resume:
             parser.error("--resume is not supported with --compare_base")

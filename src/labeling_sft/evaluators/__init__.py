@@ -1,1 +1,1 @@
-from labeling_sft.evaluators.qwen import QwenEvaluator
+from labeling_sft.evaluators.ollama_evaluator import OllamaEvaluator

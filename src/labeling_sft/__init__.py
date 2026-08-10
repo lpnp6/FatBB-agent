@@ -39,7 +39,7 @@ from labeling_sft.interfaces import (
 from labeling_sft.configs import QLoRAConfig
 from labeling_sft.dataset_builders import BuildFromFileDatasetBuilder, SqliteLocalBuilder
 from labeling_sft.dataset_loaders import LocalJsonlDatasetLoader
-from labeling_sft.evaluators import QwenEvaluator
+from labeling_sft.evaluators import OllamaEvaluator
 from labeling_sft.orchestrator import PipelineResult, SFTOrchestrator
 from labeling_sft.trainers import QLoRATrainer
 
@@ -72,7 +72,7 @@ __all__ = [
     "LocalJsonlDatasetLoader",
     "QLoRATrainer",
     "GGUFExporter",
-    "QwenEvaluator",
+    "OllamaEvaluator",
     "PipelineResult",
     "SFTOrchestrator",
 ]
