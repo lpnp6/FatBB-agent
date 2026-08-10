@@ -1,41 +1,20 @@
-"""Evaluate a fine-tuned Qwen2.5-3B QLoRA model against the validation set.
+"""Deterministic evaluation for Qwen recipe-extraction models.
 
-Loads the 4-bit base model with the saved LoRA adapter, runs greedy-decoding
-inference on every validation example, and reports:
-
-- JSON validity (% of outputs that parse as valid JSON)
-- Schema validity (% passing the labeling validator)
-- Enum accuracy (% of enum fields matching allowed values)
-- Per-field completeness vs the gold labels
-
-Comparison mode (``compare()``) also runs the base model **without** the
-LoRA adapter on the same validation set and produces a side-by-side report.
-
-Usage::
-
-    # Evaluate fine-tuned model only
-    PYTHONPATH=src python -m labeling_sft.evaluators.qwen \\
-        --adapter_dir models/qwen2.5-3b-fatbb-v1 \\
-        --val_file data/training/val.jsonl
-
-    # Compare fine-tuned vs base model
-    PYTHONPATH=src python -m labeling_sft.evaluators.qwen \\
-        --adapter_dir models/qwen2.5-3b-fatbb-v1 \\
-        --val_file data/training/val.jsonl \\
-        --compare_base
+The evaluator separates generation from scoring.  Scoring is CPU-only and
+compares structured predictions with gold JSON using accuracy and F1 metrics;
+it can therefore be tested without loading a model or GPU dependencies.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import logging
 import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from labeling.utils.validator import OutputValidator, OutputValidationError
+from labeling.utils.validator import OutputValidationError, OutputValidator
 from labeling_sft.contracts import (
     ArtifactLocation,
     ArtifactLocationType,
@@ -49,199 +28,225 @@ from labeling_sft.contracts import (
 from labeling_sft.interfaces.evaluator import BaseEvaluator
 from labeling_sft.trainers.qlora import format_example, load_system_prompt
 
-logger = logging.getLogger(__name__)
+_VALIDATOR = OutputValidator(mode="finetune")
+_SCALAR_FIELDS = (
+    ("name", ("dish", "name")),
+    ("dish_type", ("dish", "dish_type")),
+    ("difficulty", ("dish", "difficulty")),
+    ("cuisine", ("dish", "cuisine", "name")),
+    ("prep_time", ("dish", "prep_time_min")),
+    ("cooking_time", ("dish", "cooking_time_min")),
+    ("total_time", ("dish", "total_time_min")),
+    ("servings", ("dish", "servings")),
+    ("calories", ("dish", "calories_per_serving")),
+)
 
-_validator = OutputValidator()  # shared instance — stateless, thread-safe
-
-
-# ---------------------------------------------------------------------------
-# JSON extraction helper
-# ---------------------------------------------------------------------------
 
 def _extract_json(text: str) -> str | None:
-    """Try to extract a JSON object from model output.
-
-    Handles outputs that may include trailing prose, markdown fences, or
-    chat-template continuations.
-    """
-    # Strip trailing chat tokens if present
-    text = re.sub(r"<\|im_end\|>.*$", "", text).strip()
-
-    # Try bare parse first
+    """Return one JSON object from a model response, if present."""
+    text = re.sub(r"<\|im_end\|>.*$", "", text, flags=re.DOTALL).strip()
     try:
         json.loads(text)
         return text
     except json.JSONDecodeError:
         pass
-
-    # Try extracting from markdown code fence
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if m:
-        return m.group(1)
-
-    # Try finding the outermost JSON object
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if m:
-        return m.group(0)
-
-    return None
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fenced:
+        return fenced.group(1)
+    object_match = re.search(r"\{.*\}", text, re.DOTALL)
+    return object_match.group(0) if object_match else None
 
 
-# ---------------------------------------------------------------------------
-# Metrics helpers
-# ---------------------------------------------------------------------------
-
-def _check_enum_values(output: dict[str, Any]) -> dict[str, int]:
-    """Count enum fields and how many are valid."""
-    from labeling.models.enums import (
-        CookingMethod, DietaryTag, Difficulty, DishType, HeatLevel,
-        IngredientCategory, TasteProfile,
-    )
-
-    valid = 0
-    total = 0
-
-    dish = output.get("dish")
-    if isinstance(dish, dict):
-        # dish_type
-        if dish.get("dish_type") is not None:
-            total += 1
-            try:
-                DishType(dish["dish_type"])
-                valid += 1
-            except ValueError:
-                pass
-        # difficulty
-        if dish.get("difficulty") is not None:
-            total += 1
-            try:
-                Difficulty(dish["difficulty"])
-                valid += 1
-            except ValueError:
-                pass
-        # taste_profile
-        for tag in dish.get("taste_profile") or []:
-            total += 1
-            try:
-                TasteProfile(tag)
-                valid += 1
-            except ValueError:
-                pass
-        # dietary
-        for tag in dish.get("dietary") or []:
-            total += 1
-            try:
-                DietaryTag(tag)
-                valid += 1
-            except ValueError:
-                pass
-        # cooking_steps method
-        for step in dish.get("cooking_steps") or []:
-            if step.get("method"):
-                total += 1
-                try:
-                    CookingMethod(step["method"])
-                    valid += 1
-                except ValueError:
-                    pass
-            if step.get("heat_level"):
-                total += 1
-                try:
-                    HeatLevel(step["heat_level"])
-                    valid += 1
-                except ValueError:
-                    pass
-        # ingredient category
-        for ing in output.get("ingredients") or []:
-            if ing.get("category"):
-                total += 1
-                try:
-                    IngredientCategory(ing["category"])
-                    valid += 1
-                except ValueError:
-                    pass
-
-    return {"total_enum_fields": total, "valid_enum_fields": valid}
+def _normal(value: Any) -> Any:
+    """Normalize harmless text differences while retaining structured meaning."""
+    if isinstance(value, str):
+        return " ".join(value.casefold().split())
+    if isinstance(value, list):
+        return [_normal(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _normal(item) for key, item in value.items()}
+    return value
 
 
-def _per_field_coverages(outputs: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
-    """Compute per-field presence counts across all outputs."""
-    fields: Counter[str] = Counter()
-    for out in outputs:
-        dish = out.get("dish")
-        if not isinstance(dish, dict) or dish is None:
-            continue
-        for key in ("name", "dish_type", "taste_profile", "dietary",
-                     "cooking_time_min", "prep_time_min", "total_time_min",
-                     "difficulty", "servings", "calories_per_serving",
-                     "description", "cooking_steps", "cuisine"):
-            val = dish.get(key)
-            if val is not None and val != []:
-                fields[key] += 1
-        if out.get("ingredients"):
-            fields["ingredients"] += 1
+def _path(value: dict[str, Any], path: tuple[str, ...]) -> Any:
+    current: Any = value
+    for part in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
 
+
+def _f1(counts: Counter[str], name: str) -> dict[str, float | int]:
+    tp, fp, fn = (counts[f"{name}_{key}"] for key in ("tp", "fp", "fn"))
+    precision = tp / (tp + fp) if tp + fp else 0.0
+    recall = tp / (tp + fn) if tp + fn else 0.0
     return {
-        field: {"present": count, "total": len(outputs), "pct": round(count * 100 / len(outputs))}
-        for field, count in fields.most_common()
+        "precision_pct": round(precision * 100, 1),
+        "recall_pct": round(recall * 100, 1),
+        "f1_pct": round(2 * precision * recall / (precision + recall) * 100, 1)
+        if precision + recall else 0.0,
+        "support": tp + fn,
     }
 
 
-# ---------------------------------------------------------------------------
-# Evaluation
-# ---------------------------------------------------------------------------
+def _accuracy(counts: Counter[str], name: str) -> dict[str, float | int]:
+    correct, total = counts[f"{name}_correct"], counts[f"{name}_total"]
+    return {
+        "accuracy_pct": round(correct / total * 100, 1) if total else 0.0,
+        "correct": correct,
+        "support": total,
+    }
+
+
+def _add_set_score(counts: Counter[str], name: str, predicted: set[Any], gold: set[Any]) -> None:
+    counts[f"{name}_tp"] += len(predicted & gold)
+    counts[f"{name}_fp"] += len(predicted - gold)
+    counts[f"{name}_fn"] += len(gold - predicted)
+
+
+def _is_non_recipe(value: dict[str, Any]) -> bool:
+    return value.get("dish") is None and value.get("reason") == "not_a_recipe"
+
+
+def _ingredient_map(value: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for ingredient in value.get("ingredients") or []:
+        if isinstance(ingredient, dict) and ingredient.get("name"):
+            result[str(_normal(ingredient["name"]))] = ingredient
+    return result
+
+
+def _step_pairs(value: dict[str, Any], *, refs: bool = False) -> set[tuple[Any, ...]]:
+    dish = value.get("dish")
+    if not isinstance(dish, dict):
+        return set()
+    pairs: set[tuple[Any, ...]] = set()
+    for step in dish.get("cooking_steps") or []:
+        if not isinstance(step, dict):
+            continue
+        order = step.get("order")
+        if refs:
+            pairs.update((order, _normal(ref)) for ref in step.get("ingredient_refs") or [])
+        elif step.get("method") is not None:
+            pairs.add((order, _normal(step["method"])))
+    return pairs
+
+
+def _relation_triples(value: dict[str, Any]) -> set[tuple[Any, ...]]:
+    triples: set[tuple[Any, ...]] = set()
+    for relation in (value.get("ingredient_relations") or []) + (value.get("dish_relations") or []):
+        if not isinstance(relation, dict):
+            continue
+        source = relation.get("from_ingredient", relation.get("from_dish"))
+        target = relation.get("to_ingredient", relation.get("to_dish"))
+        kind = relation.get("relation")
+        if source and target and kind:
+            triples.add((_normal(source), _normal(kind), _normal(target)))
+    return triples
+
+
+def _score_record(gold: dict[str, Any], predicted: dict[str, Any], counts: Counter[str]) -> None:
+    """Accumulate deterministic structured-extraction metrics for one record."""
+    gold_non_recipe = _is_non_recipe(gold)
+    predicted_non_recipe = _is_non_recipe(predicted)
+    counts["non_recipe_tp"] += int(gold_non_recipe and predicted_non_recipe)
+    counts["non_recipe_fp"] += int(not gold_non_recipe and predicted_non_recipe)
+    counts["non_recipe_fn"] += int(gold_non_recipe and not predicted_non_recipe)
+    counts["exact_match_correct"] += int(_normal(gold) == _normal(predicted))
+    counts["exact_match_total"] += 1
+
+    if gold_non_recipe:
+        return
+
+    for _name, field_path in _SCALAR_FIELDS:
+        counts["scalar_correct"] += int(_normal(_path(gold, field_path)) == _normal(_path(predicted, field_path)))
+        counts["scalar_total"] += 1
+
+    gold_dish = gold.get("dish") if isinstance(gold.get("dish"), dict) else {}
+    predicted_dish = predicted.get("dish") if isinstance(predicted.get("dish"), dict) else {}
+    for field in ("dietary", "taste_profile"):
+        gold_tags = {_normal(tag) for tag in gold_dish.get(field) or []}
+        predicted_tags = {_normal(tag) for tag in predicted_dish.get(field) or []}
+        _add_set_score(counts, "tag", predicted_tags, gold_tags)
+
+    gold_ingredients, predicted_ingredients = _ingredient_map(gold), _ingredient_map(predicted)
+    _add_set_score(counts, "ingredient", set(predicted_ingredients), set(gold_ingredients))
+    for name in set(gold_ingredients) & set(predicted_ingredients):
+        for field in ("amount", "category", "preparation", "is_essential"):
+            counts["ingredient_attribute_correct"] += int(
+                _normal(gold_ingredients[name].get(field)) == _normal(predicted_ingredients[name].get(field))
+            )
+            counts["ingredient_attribute_total"] += 1
+
+    _add_set_score(counts, "step_method", _step_pairs(predicted), _step_pairs(gold))
+    _add_set_score(counts, "step_ingredient_ref", _step_pairs(predicted, refs=True), _step_pairs(gold, refs=True))
+    _add_set_score(counts, "relation", _relation_triples(predicted), _relation_triples(gold))
+
+
+def _score_records(records: list[tuple[dict[str, Any], dict[str, Any], bool, bool]]) -> dict[str, Any]:
+    """Return evaluation metrics for ``(gold, prediction, json_valid, schema_valid)`` records."""
+    counts: Counter[str] = Counter()
+    for gold, predicted, json_valid, schema_valid in records:
+        counts["json_valid"] += int(json_valid)
+        counts["schema_valid"] += int(schema_valid)
+        _score_record(gold, predicted, counts)
+
+    total = len(records)
+    return {
+        "total_examples": total,
+        "json_validity_pct": round(counts["json_valid"] / total * 100, 1) if total else 0.0,
+        "schema_validity_pct": round(counts["schema_valid"] / total * 100, 1) if total else 0.0,
+        "exact_match": _accuracy(counts, "exact_match"),
+        "non_recipe": _f1(counts, "non_recipe"),
+        "scalar_fields": _accuracy(counts, "scalar"),
+        "tags": _f1(counts, "tag"),
+        "ingredients": _f1(counts, "ingredient"),
+        "ingredient_attributes": _accuracy(counts, "ingredient_attribute"),
+        "step_methods": _f1(counts, "step_method"),
+        "step_ingredient_refs": _f1(counts, "step_ingredient_ref"),
+        "relations": _f1(counts, "relation"),
+    }
+
 
 class QwenEvaluator(BaseEvaluator):
-    """Evaluate a Qwen2.5-3B model (base or fine-tuned) on labeling data.
-
-    Supports single-model evaluation and base-vs-fine-tuned comparison.
-    """
+    """Evaluate a Qwen QLoRA adapter with deterministic recipe metrics."""
 
     def __init__(self, base_model_id: str = "Qwen/Qwen2.5-3B-Instruct") -> None:
         self._default_base = base_model_id
-
-    # ── BaseEvaluator implementation ────────────────────────────────────
 
     def load_model(
         self,
         training: TrainingResult,
         include_adapter: bool = True,
         local_files_only: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> tuple[Any, Any]:
-        """Load 4-bit model, optionally with a LoRA adapter."""
+        """Load the 4-bit base model and optional LoRA adapter."""
         import torch
         from peft import PeftModel
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
         compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        bnb_config = BitsAndBytesConfig(
+        quantization = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=compute_dtype,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
         )
-
-        logger.info("Loading base model: %s", training.base_model_id)
         tokenizer = AutoTokenizer.from_pretrained(
             training.base_model_id, trust_remote_code=True, local_files_only=local_files_only,
         )
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
+        tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
         model = AutoModelForCausalLM.from_pretrained(
             training.base_model_id,
-            quantization_config=bnb_config,
+            quantization_config=quantization,
             device_map="auto",
             trust_remote_code=True,
             local_files_only=local_files_only,
         )
-
         if include_adapter:
-            adapter_path = self._local_artifact_path(training.adapter, "adapter")
-            logger.info("Loading LoRA adapter: %s", adapter_path)
-            model = PeftModel.from_pretrained(model, adapter_path)
-
+            model = PeftModel.from_pretrained(model, self._local_artifact_path(training.adapter, "adapter"))
         model.eval()
         return model, tokenizer
 
@@ -252,46 +257,13 @@ class QwenEvaluator(BaseEvaluator):
         report_target: ArtifactLocation | None = None,
         max_samples: int | None = None,
         local_files_only: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> EvalReport:
-        """Evaluate a single model on the validation set."""
-        val_path_obj = self._local_data_path(dataset.val, "validation split")
-        if not val_path_obj.exists():
-            raise FileNotFoundError(f"Validation file not found: {dataset.val.value}")
-
-        with val_path_obj.open("r", encoding="utf-8") as fh:
-            gold_records = [json.loads(line) for line in fh if line.strip()]
-
-        total_available = len(gold_records)
-        if max_samples is not None and max_samples < len(gold_records):
-            gold_records = gold_records[:max_samples]
-            logger.info("Limited to first %d samples (%.1f%% of full set)", max_samples,
-                        max_samples * 100 / total_available)
-
-        system_prompt = load_system_prompt()
-        model, tokenizer = self.load_model(
-            training, local_files_only=local_files_only,
-        )
-
-        metrics = self._run_eval_pass(model, tokenizer, gold_records, system_prompt)
-
-        report = EvalReport(
-            model_label="Fine-tuned",
-            total_examples=metrics["total_examples"],
-            metrics=metrics,
-        )
-
+        """Evaluate the fine-tuned model on the validation split."""
+        metrics = self._evaluate_metrics(training, dataset, max_samples, local_files_only)
+        report = EvalReport("Fine-tuned", metrics["total_examples"], metrics)
+        self._write_report(metrics, report_target)
         self._print_metrics(metrics, report.model_label)
-
-        if report_target:
-            report_path = self._local_artifact_path(report_target, "report_target")
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            report_path.write_text(
-                json.dumps(metrics, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            print(f"\n  Report saved to {report_path}")
-
         return report
 
     def compare(
@@ -302,486 +274,174 @@ class QwenEvaluator(BaseEvaluator):
         diff_examples: int = 5,
         max_samples: int | None = None,
         local_files_only: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> ComparisonReport:
-        """Compare base model vs fine-tuned model."""
+        """Compare base and fine-tuned models using the same deterministic metrics."""
         import torch
 
-        val_path_obj = self._local_data_path(dataset.val, "validation split")
-        if not val_path_obj.exists():
-            raise FileNotFoundError(f"Validation file not found: {dataset.val.value}")
-
-        with val_path_obj.open("r", encoding="utf-8") as fh:
-            gold_records = [json.loads(line) for line in fh if line.strip()]
-
-        total_available = len(gold_records)
-        if max_samples is not None and max_samples < len(gold_records):
-            gold_records = gold_records[:max_samples]
-            logger.info("Limited to first %d samples (%.1f%% of full set)", max_samples,
-                        max_samples * 100 / total_available)
-
+        records = self._load_records(dataset, max_samples)
         system_prompt = load_system_prompt()
-
-        # ── Phase 1: Base model ─────────────────────────────────────────
-        print(f"\n{'=' * 60}")
-        print("  Phase 1/2: Evaluating base model (no adapter)")
-        print(f"{'=' * 60}")
-        base_model, tokenizer = self.load_model(
-            training, include_adapter=False, local_files_only=local_files_only,
-        )
-        base_metrics = self._run_eval_pass(
-            base_model, tokenizer, gold_records, system_prompt,
-            return_predictions=(diff_examples > 0),
-        )
-
+        base_model, tokenizer = self.load_model(training, include_adapter=False, local_files_only=local_files_only)
+        base_metrics, base_predictions = self._run_eval_pass(base_model, tokenizer, records, system_prompt)
         del base_model
         torch.cuda.empty_cache()
 
-        # ── Phase 2: Fine-tuned model ───────────────────────────────────
-        print(f"\n{'=' * 60}")
-        print("  Phase 2/2: Evaluating fine-tuned model")
-        print(f"{'=' * 60}")
-        ft_model, _ = self.load_model(
-            training, local_files_only=local_files_only,
+        fine_tuned_model, tokenizer = self.load_model(training, local_files_only=local_files_only)
+        fine_tuned_metrics, fine_tuned_predictions = self._run_eval_pass(
+            fine_tuned_model, tokenizer, records, system_prompt,
         )
-        ft_metrics = self._run_eval_pass(
-            ft_model, tokenizer, gold_records, system_prompt,
-            return_predictions=(diff_examples > 0),
+        del fine_tuned_model
+        torch.cuda.empty_cache()
+
+        self._write_report(
+            {"base_model_id": training.base_model_id, "base": base_metrics, "fine_tuned": fine_tuned_metrics},
+            report_target,
         )
-
-        # ── Build reports ───────────────────────────────────────────────
-        base_report = EvalReport(
-            model_label="Base (no adapter)",
-            total_examples=base_metrics["total_examples"],
-            metrics=base_metrics,
-        )
-        ft_report = EvalReport(
-            model_label="Fine-tuned",
-            total_examples=ft_metrics["total_examples"],
-            metrics=ft_metrics,
-        )
-
-        # ── Print comparison ────────────────────────────────────────────
-        print("\n" + "=" * 60)
-        print("  Side-by-Side Comparison")
-        print("=" * 60)
-        self._print_metrics(base_metrics, "Base Model (no adapter)")
-        self._print_metrics(ft_metrics, "Fine-tuned Model")
-        self._print_comparison(ft_metrics, base_metrics)
-
-        # ── Divergent examples ──────────────────────────────────────────
-        divergent: list[dict[str, Any]] = []
-        if diff_examples > 0:
-            print("\n" + "=" * 60)
-            print("  Divergent Examples")
-            print("=" * 60)
-            base_preds = base_metrics.get("predictions", [])
-            ft_preds = ft_metrics.get("predictions", [])
-            divergent = self._build_divergent_examples(base_preds, ft_preds, diff_examples)
-            self._print_example_diffs(base_preds, ft_preds, diff_examples)
-
-        # ── Write report ────────────────────────────────────────────────
-        if report_target:
-            comparison = {
-                "base_model_id": training.base_model_id,
-                "adapter": training.adapter.value,
-                "base": {k: v for k, v in base_metrics.items() if k != "predictions"},
-                "fine_tuned": {k: v for k, v in ft_metrics.items() if k != "predictions"},
-            }
-            report_path = self._local_artifact_path(report_target, "report_target")
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            report_path.write_text(
-                json.dumps(comparison, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            print(f"\n  Comparison report saved to {report_path}")
-
+        self._print_metrics(base_metrics, "Base")
+        self._print_metrics(fine_tuned_metrics, "Fine-tuned")
+        divergent = self._divergent_examples(base_predictions, fine_tuned_predictions, diff_examples)
         return ComparisonReport(
             base_model_id=training.base_model_id,
             adapter=training.adapter,
-            base=base_report,
-            fine_tuned=ft_report,
+            base=EvalReport("Base", base_metrics["total_examples"], base_metrics),
+            fine_tuned=EvalReport("Fine-tuned", fine_tuned_metrics["total_examples"], fine_tuned_metrics),
             divergent_examples=divergent,
         )
 
-    # ── Core eval pass ──────────────────────────────────────────────────
+    def _evaluate_metrics(
+        self,
+        training: TrainingResult,
+        dataset: DatasetSplit,
+        max_samples: int | None,
+        local_files_only: bool,
+    ) -> dict[str, Any]:
+        records = self._load_records(dataset, max_samples)
+        model, tokenizer = self.load_model(training, local_files_only=local_files_only)
+        metrics, _predictions = self._run_eval_pass(model, tokenizer, records, load_system_prompt())
+        return metrics
 
     @staticmethod
-    def _local_data_path(location: DataLocation, name: str) -> Path:
-        if location.type is not DataLocationType.LOCAL_PATH:
-            raise NotImplementedError(
-                f"QwenEvaluator only supports local JSONL; "
-                f"{name} uses {location.type.value}"
-            )
-        return Path(location.value)
-
-    @staticmethod
-    def _local_artifact_path(location: ArtifactLocation, name: str) -> Path:
-        if location.type is not ArtifactLocationType.LOCAL_PATH:
-            raise NotImplementedError(
-                f"QwenEvaluator only supports local artifacts; "
-                f"{name} uses {location.type.value}"
-            )
-        return Path(location.value)
+    def _load_records(dataset: DatasetSplit, max_samples: int | None) -> list[dict[str, Any]]:
+        path = QwenEvaluator._local_data_path(dataset.val, "validation split")
+        with path.open(encoding="utf-8") as stream:
+            records = [json.loads(line) for line in stream if line.strip()]
+        return records if max_samples is None else records[:max_samples]
 
     @staticmethod
     def _run_eval_pass(
         model: Any,
         tokenizer: Any,
-        gold_records: list[dict[str, Any]],
+        records: list[dict[str, Any]],
         system_prompt: str,
-        *,
-        return_predictions: bool = False,
-    ) -> dict[str, Any]:
-        """Run inference on all *gold_records* and return per-metric aggregates."""
-        json_valid = 0
-        validator_pass = 0
-        validator_errors: Counter[str] = Counter()
-        not_recipe_correct = 0
-        not_recipe_total = 0
-        all_enum_results: list[dict[str, int]] = []
-        predicted_outputs: list[dict[str, Any]] = []
-        per_example: list[tuple[int, dict[str, Any], str]] = []
-
-        for i, record in enumerate(gold_records):
-            gold_output = json.loads(record["output"])
-            is_not_recipe = gold_output.get("dish") is None
-
-            prompt = format_example(
-                {"instruction": record["instruction"],
-                 "input": record["input"],
-                 "output": ""},
-                system_prompt,
-            )
-            # Remove the empty assistant block — we want just the prompt
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        scored: list[tuple[dict[str, Any], dict[str, Any], bool, bool]] = []
+        predictions: list[dict[str, Any]] = []
+        for index, record in enumerate(records):
+            gold = json.loads(record["output"])
+            prompt = format_example({**record, "output": ""}, system_prompt)
             prompt = prompt.rsplit("<|im_start|>assistant\n", 1)[0] + "<|im_start|>assistant\n"
-
-            generated = QwenEvaluator._generate_one(model, tokenizer, prompt)
-
-            # JSON validity
-            json_text = _extract_json(generated)
-            if json_text is None:
-                logger.warning("[%d/%d] JSON parse failed", i + 1, len(gold_records))
-                continue
-            json_valid += 1
-
-            try:
-                predicted = json.loads(json_text)
-            except json.JSONDecodeError:
-                continue
-
-            predicted_outputs.append(predicted)
-            if return_predictions:
-                per_example.append((i, predicted, generated))
-
-            # Schema validity
-            try:
-                _validator.parse(json_text)
-                validator_pass += 1
-            except OutputValidationError as exc:
-                msg = str(exc)
-                if "not found" in msg:
-                    validator_errors["cross_ref_mismatch"] += 1
-                elif ": invalid value" in msg:
-                    validator_errors["invalid_enum"] += 1
-                elif "expected" in msg:
-                    validator_errors["type_mismatch"] += 1
-                elif "required" in msg:
-                    validator_errors["missing_required"] += 1
-                elif "reason=not_a_recipe" in msg:
-                    validator_errors["bad_non_recipe"] += 1
-                else:
-                    validator_errors["other"] += 1
-
-            # not_a_recipe accuracy
-            if is_not_recipe:
-                not_recipe_total += 1
-                if predicted.get("dish") is None and predicted.get("reason") == "not_a_recipe":
-                    not_recipe_correct += 1
-
-            # Enum accuracy
-            all_enum_results.append(_check_enum_values(predicted))
-
-        total = len(gold_records)
-
-        total_enum = sum(r["total_enum_fields"] for r in all_enum_results)
-        valid_enum = sum(r["valid_enum_fields"] for r in all_enum_results)
-        enum_acc = (valid_enum / total_enum * 100) if total_enum > 0 else 0.0
-
-        field_cov = _per_field_coverages(predicted_outputs)
-
-        result: dict[str, Any] = {
-            "total_examples": total,
-            "json_valid": json_valid,
-            "json_validity_pct": round(json_valid / total * 100, 1),
-            "validator_pass": validator_pass,
-            "validator_pass_pct": round(validator_pass / total * 100, 1),
-            "validator_errors": dict(validator_errors),
-            "enum_total_fields": total_enum,
-            "enum_valid_fields": valid_enum,
-            "enum_accuracy_pct": round(enum_acc, 1),
-            "not_a_recipe_total": not_recipe_total,
-            "not_a_recipe_correct": not_recipe_correct,
-            "not_a_recipe_accuracy_pct": (
-                round(not_recipe_correct / not_recipe_total * 100, 1)
-                if not_recipe_total > 0 else None
-            ),
-            "field_coverage": field_cov,
-        }
-        if return_predictions:
-            result["predictions"] = per_example
-        return result
+            raw_output = QwenEvaluator._generate_one(model, tokenizer, prompt)
+            json_text = _extract_json(raw_output)
+            predicted: dict[str, Any] = {}
+            json_valid = False
+            schema_valid = False
+            if json_text:
+                try:
+                    parsed = json.loads(json_text)
+                    if isinstance(parsed, dict):
+                        predicted, json_valid = parsed, True
+                        try:
+                            _VALIDATOR.parse(json_text)
+                            schema_valid = True
+                        except OutputValidationError:
+                            pass
+                except json.JSONDecodeError:
+                    pass
+            scored.append((gold, predicted, json_valid, schema_valid))
+            predictions.append({"index": index, "prediction": predicted, "raw_output": raw_output})
+        return _score_records(scored), predictions
 
     @staticmethod
-    def _generate_one(
-        model: Any,
-        tokenizer: Any,
-        prompt: str,
-        max_new_tokens: int = 4096,
-    ) -> str:
-        """Run greedy-decoding inference and return the generated text."""
+    def _generate_one(model: Any, tokenizer: Any, prompt: str, max_new_tokens: int = 4096) -> str:
         import torch
 
         inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=8192 - max_new_tokens)
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
-
+        inputs = {key: value.to(model.device) for key, value in inputs.items()}
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
-                temperature=None,
-                top_p=None,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
             )
+        return tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
-        generated = outputs[0][inputs["input_ids"].shape[1]:]
-        return tokenizer.decode(generated, skip_special_tokens=True).strip()
+    @staticmethod
+    def _local_data_path(location: DataLocation, name: str) -> Path:
+        if location.type is not DataLocationType.LOCAL_PATH:
+            raise NotImplementedError(f"QwenEvaluator only supports local JSONL; {name} uses {location.type.value}")
+        return Path(location.value)
 
-    # ── Display helpers ─────────────────────────────────────────────────
+    @staticmethod
+    def _local_artifact_path(location: ArtifactLocation, name: str) -> Path:
+        if location.type is not ArtifactLocationType.LOCAL_PATH:
+            raise NotImplementedError(f"QwenEvaluator only supports local artifacts; {name} uses {location.type.value}")
+        return Path(location.value)
+
+    @staticmethod
+    def _write_report(metrics: dict[str, Any], target: ArtifactLocation | None) -> None:
+        if not target:
+            return
+        path = QwenEvaluator._local_artifact_path(target, "report_target")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     @staticmethod
     def _print_metrics(metrics: dict[str, Any], label: str) -> None:
-        """Pretty-print a single-model metrics dict with a header."""
-        print(f"\n{'─' * 60}")
-        print(f"  {label}")
-        print(f"{'─' * 60}")
-        print(f"  Examples:           {metrics['total_examples']}")
-        print(f"  JSON valid:         {metrics['json_valid']}/{metrics['total_examples']} "
-              f"({metrics['json_validity_pct']:.1f}%)")
-        print(f"  Validator pass:     {metrics['validator_pass']}/{metrics['total_examples']} "
-              f"({metrics['validator_pass_pct']:.1f}%)")
-        if metrics.get("validator_errors"):
-            print(f"  Validator failures:")
-            for err_type, count in sorted(metrics["validator_errors"].items(), key=lambda x: -x[1]):
-                pct = round(count / metrics['total_examples'] * 100, 1)
-                print(f"    {err_type}: {count} ({pct}%)")
-        print(f"  Enum accuracy:      {metrics['enum_valid_fields']}/{metrics['enum_total_fields']} "
-              f"({metrics['enum_accuracy_pct']:.1f}%)")
-        if metrics["not_a_recipe_total"] > 0:
-            na = metrics["not_a_recipe_accuracy_pct"]
-            print(f"  Not-a-recipe acc:   {metrics['not_a_recipe_correct']}/"
-                  f"{metrics['not_a_recipe_total']} ({na:.1f}%)")
-        print(f"  Field coverage:")
-        for field, info in metrics["field_coverage"].items():
-            print(f"    {field}: {info['present']}/{info['total']} ({info['pct']}%)")
+        print(f"\n{label}: {metrics['total_examples']} examples")
+        print(f"  JSON/schema validity: {metrics['json_validity_pct']:.1f}% / {metrics['schema_validity_pct']:.1f}%")
+        for name in ("exact_match", "non_recipe", "scalar_fields", "tags", "ingredients", "ingredient_attributes", "step_methods", "step_ingredient_refs", "relations"):
+            value = metrics[name]
+            score = value.get("f1_pct", value.get("accuracy_pct", 0.0))
+            print(f"  {name}: {score:.1f}% (n={value['support']})")
 
     @staticmethod
-    def _print_comparison(finetuned: dict[str, Any], base: dict[str, Any]) -> None:
-        """Print a side-by-side comparison table with deltas."""
-        def _delta(ft_val: float | int, base_val: float | int) -> str:
-            diff = ft_val - base_val
-            sign = "+" if diff >= 0 else ""
-            return f"{sign}{diff:.1f}" if isinstance(diff, float) else f"{sign}{diff}"
-
-        rows: list[tuple[str, str, str, str]] = []
-
-        rows.append(("JSON validity %",
-                     f"{finetuned['json_validity_pct']:.1f}%",
-                     f"{base['json_validity_pct']:.1f}%",
-                     _delta(finetuned['json_validity_pct'], base['json_validity_pct'])))
-        rows.append(("Validator pass %",
-                     f"{finetuned['validator_pass_pct']:.1f}%",
-                     f"{base['validator_pass_pct']:.1f}%",
-                     _delta(finetuned['validator_pass_pct'], base['validator_pass_pct'])))
-        rows.append(("Enum accuracy %",
-                     f"{finetuned['enum_accuracy_pct']:.1f}%",
-                     f"{base['enum_accuracy_pct']:.1f}%",
-                     _delta(finetuned['enum_accuracy_pct'], base['enum_accuracy_pct'])))
-        if finetuned["not_a_recipe_total"] > 0:
-            rows.append(("Not-a-recipe acc %",
-                         f"{finetuned['not_a_recipe_accuracy_pct']:.1f}%",
-                         f"{base['not_a_recipe_accuracy_pct']:.1f}%",
-                         _delta(finetuned['not_a_recipe_accuracy_pct'],
-                                base['not_a_recipe_accuracy_pct'])))
-
-        all_fields = set(finetuned["field_coverage"]) | set(base["field_coverage"])
-        for field in sorted(all_fields):
-            ft_cov = finetuned["field_coverage"].get(field, {})
-            base_cov = base["field_coverage"].get(field, {})
-            ft_pct = ft_cov.get("pct", 0)
-            base_pct = base_cov.get("pct", 0)
-            rows.append((f"  field: {field}",
-                         f"{ft_pct}%",
-                         f"{base_pct}%",
-                         _delta(ft_pct, base_pct)))
-
-        col_widths = [32, 16, 16, 10]
-        header = ["Metric", "Fine-tuned", "Base", "Δ"]
-        sep = "─" * (sum(col_widths) + 9)
-
-        print(f"\n{sep}")
-        print(f"  {header[0]:<{col_widths[0]}} │ {header[1]:>{col_widths[1]}} │ "
-              f"{header[2]:>{col_widths[2]}} │ {header[3]:>{col_widths[3]}}")
-        print(f"  {'─' * col_widths[0]}─┼─{'─' * col_widths[1]}─┼─"
-              f"{'─' * col_widths[2]}─┼─{'─' * col_widths[3]}")
-        for label, ft_val, base_val, delta in rows:
-            delta_str = f"\033[92m{delta}\033[0m" if delta.startswith("+") else (
-                f"\033[91m{delta}\033[0m" if delta.startswith("-") else delta)
-            print(f"  {label:<{col_widths[0]}} │ {ft_val:>{col_widths[1]}} │ "
-                  f"{base_val:>{col_widths[2]}} │ {delta_str:>{col_widths[3]}}")
-        print(f"{sep}\n")
-
-    @staticmethod
-    def _summarize(pred: dict[str, Any]) -> str:
-        """One-line summary of a predicted labeling dict."""
-        dish = pred.get("dish")
-        if dish is None:
-            reason = pred.get("reason", "?")
-            return f"not_a_recipe (reason={reason})"
-        name = dish.get("name", "?")
-        dish_type = dish.get("dish_type", "?")
-        n_ingredients = len(pred.get("ingredients") or [])
-        n_steps = len(dish.get("cooking_steps") or [])
-        return f"dish={name!r}, type={dish_type}, {n_ingredients} ingredients, {n_steps} steps"
-
-    @classmethod
-    def _print_example_diffs(
-        cls,
-        base_preds: list[tuple[int, dict[str, Any], str]],
-        ft_preds: list[tuple[int, dict[str, Any], str]],
-        max_examples: int,
-    ) -> None:
-        """Print up to *max_examples* side-by-side diffs."""
-        base_by_idx: dict[int, dict[str, Any]] = {idx: pred for idx, pred, _raw in base_preds}
-        ft_by_idx: dict[int, dict[str, Any]] = {idx: pred for idx, pred, _raw in ft_preds}
-
-        all_indices = sorted(set(base_by_idx) | set(ft_by_idx))
-        diffs: list[tuple[int, str, str]] = []
-
-        for idx in all_indices:
-            base_out = base_by_idx.get(idx)
-            ft_out = ft_by_idx.get(idx)
-
-            if base_out is None and ft_out is not None:
-                diffs.append((idx, "(JSON parse failed)", cls._summarize(ft_out)))
-            elif base_out is not None and ft_out is None:
-                diffs.append((idx, cls._summarize(base_out), "(JSON parse failed)"))
-            elif base_out != ft_out:
-                diffs.append((idx, cls._summarize(base_out), cls._summarize(ft_out)))
-
-        if not diffs:
-            print("  (No differences found — both models produced identical outputs on all examples)")
-            return
-
-        shown = diffs[:max_examples]
-        print(f"\n  Showing {len(shown)} of {len(diffs)} divergent examples:")
-        for idx, base_summary, ft_summary in shown:
-            print(f"  ┌─ Example #{idx + 1}")
-            print(f"  │  Base:     {base_summary}")
-            print(f"  │  Fine-tuned: {ft_summary}")
-            print(f"  └─")
-
-    @classmethod
-    def _build_divergent_examples(
-        cls,
-        base_preds: list[tuple[int, dict[str, Any], str]],
-        ft_preds: list[tuple[int, dict[str, Any], str]],
-        max_examples: int,
+    def _divergent_examples(
+        base: list[dict[str, Any]], fine_tuned: list[dict[str, Any]], limit: int,
     ) -> list[dict[str, Any]]:
-        """Build a list of divergent example dicts."""
-        base_by_idx: dict[int, dict[str, Any]] = {idx: pred for idx, pred, _raw in base_preds}
-        ft_by_idx: dict[int, dict[str, Any]] = {idx: pred for idx, pred, _raw in ft_preds}
+        return [
+            {
+                "index": before["index"],
+                "base_prediction": before["prediction"],
+                "fine_tuned_prediction": after["prediction"],
+            }
+            for before, after in zip(base, fine_tuned)
+            if before["prediction"] != after["prediction"]
+        ][:limit]
 
-        all_indices = sorted(set(base_by_idx) | set(ft_by_idx))
-        result: list[dict[str, Any]] = []
-
-        for idx in all_indices:
-            base_out = base_by_idx.get(idx)
-            ft_out = ft_by_idx.get(idx)
-            if base_out != ft_out:
-                result.append({
-                    "index": idx,
-                    "base_summary": cls._summarize(base_out) if base_out else "(JSON parse failed)",
-                    "ft_summary": cls._summarize(ft_out) if ft_out else "(JSON parse failed)",
-                })
-
-        return result[:max_examples]
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    parser = argparse.ArgumentParser(
-        description="Evaluate a fine-tuned Qwen2.5-3B QLoRA model"
-    )
-    parser.add_argument("--adapter_dir", required=True,
-                        help="Path to the saved LoRA adapter directory")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--adapter_dir", required=True)
     parser.add_argument("--val_file", default="data/training/val.jsonl")
     parser.add_argument("--base_model_id", default="Qwen/Qwen2.5-3B-Instruct")
     parser.add_argument("--output_report", default="data/training/eval_report.json")
-    parser.add_argument(
-        "--compare_base", action="store_true",
-        help="Also evaluate the base model (no adapter) and produce a side-by-side comparison",
-    )
-    parser.add_argument(
-        "--diff_examples", type=int, default=5,
-        help="Number of divergent examples to print when --compare_base is used (default: 5, 0 disables)",
-    )
-    parser.add_argument(
-        "--local_files_only", action="store_true",
-        help="Only use locally cached model files; do not attempt to connect to Hugging Face",
-    )
-    parser.add_argument(
-        "--max_samples", type=int, default=None,
-        help="Limit evaluation to the first N validation samples (None = all)",
-    )
+    parser.add_argument("--compare_base", action="store_true")
+    parser.add_argument("--diff_examples", type=int, default=5)
+    parser.add_argument("--max_samples", type=int)
+    parser.add_argument("--local_files_only", action="store_true")
     args = parser.parse_args()
-
-    evaluator = QwenEvaluator(base_model_id=args.base_model_id)
     training = TrainingResult(
         model=ArtifactLocation.local(args.adapter_dir),
         adapter=ArtifactLocation.local(args.adapter_dir),
         base_model_id=args.base_model_id,
     )
-    dataset = DatasetSplit(
-        train=DataLocation.local(args.val_file, format="jsonl"),
-        val=DataLocation.local(args.val_file, format="jsonl"),
-    )
-
+    dataset = DatasetSplit(DataLocation.local(args.val_file), DataLocation.local(args.val_file))
+    evaluator = QwenEvaluator(args.base_model_id)
     if args.compare_base:
-        evaluator.compare(
-            training=training,
-            dataset=dataset,
-            report_target=ArtifactLocation.local("data/training/eval_comparison.json"),
-            diff_examples=args.diff_examples,
-            local_files_only=args.local_files_only,
-            max_samples=args.max_samples,
-        )
+        evaluator.compare(training, dataset, ArtifactLocation.local(args.output_report), args.diff_examples,
+                          args.max_samples, args.local_files_only)
     else:
-        evaluator.evaluate(
-            training=training,
-            dataset=dataset,
-            report_target=ArtifactLocation.local(args.output_report),
-            local_files_only=args.local_files_only,
-            max_samples=args.max_samples,
-        )
+        evaluator.evaluate(training, dataset, ArtifactLocation.local(args.output_report), max_samples=args.max_samples,
+                           local_files_only=args.local_files_only)
