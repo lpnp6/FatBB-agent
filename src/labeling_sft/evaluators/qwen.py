@@ -10,8 +10,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import re
+import sys
+import time
 from collections import Counter
 from importlib.resources import files
 from pathlib import Path
@@ -33,6 +36,7 @@ from labeling_sft.contracts import (
 from labeling_sft.interfaces.evaluator import BaseEvaluator
 from labeling_sft.trainers.qlora import format_example
 
+logger = logging.getLogger(__name__)
 _VALIDATOR = OutputValidator(mode="finetune")
 _SCALAR_FIELDS = (
     ("name", ("dish", "name")),
@@ -70,6 +74,7 @@ def _adapter_sha256(adapter: Path) -> str:
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    started = time.perf_counter()
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8") as stream:
         json.dump(payload, stream, ensure_ascii=False, indent=2)
@@ -77,10 +82,28 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
         stream.flush()
         os.fsync(stream.fileno())
     temporary.replace(path)
+    logger.info("Wrote %s in %.2fs", path, time.perf_counter() - started)
 
 
 def _load_system_prompt() -> str:
-    return files("labeling.prompts").joinpath("system.txt").read_text(encoding="utf-8").strip()
+    started = time.perf_counter()
+    prompt = files("labeling.prompts").joinpath("system.txt").read_text(encoding="utf-8").strip()
+    logger.info("Loaded system prompt (%d chars) in %.2fs", len(prompt), time.perf_counter() - started)
+    return prompt
+
+
+def _configure_logging(path: Path) -> None:
+    """Send evaluator logs to both stderr and one run-local file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+        handler.close()
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    for handler in (logging.StreamHandler(sys.stderr), logging.FileHandler(path, encoding="utf-8")):
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
 
 
 def _extract_json(text: str) -> str | None:
@@ -268,6 +291,8 @@ class QwenEvaluator(BaseEvaluator):
         from peft import PeftModel
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+        started = time.perf_counter()
+        logger.info("Loading base model %s", training.base_model_id)
         compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         quantization = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -287,8 +312,10 @@ class QwenEvaluator(BaseEvaluator):
             local_files_only=local_files_only,
         )
         if include_adapter:
+            logger.info("Loading LoRA adapter from %s", training.adapter.value)
             model = PeftModel.from_pretrained(model, self._local_artifact_path(training.adapter, "adapter"))
         model.eval()
+        logger.info("Loaded model include_adapter=%s in %.2fs", include_adapter, time.perf_counter() - started)
         return model, tokenizer
 
     def evaluate(
@@ -303,6 +330,12 @@ class QwenEvaluator(BaseEvaluator):
         **kwargs: Any,
     ) -> EvalReport:
         """Evaluate the fine-tuned model, optionally checkpointing in ``work_dir/evaluation``."""
+        log_path = self._evaluation_directory(training, work_dir) / "evaluator.log" if work_dir else (
+            self._local_artifact_path(report_target, "report_target").parent / "evaluator.log"
+            if report_target else Path("evaluator.log")
+        )
+        _configure_logging(log_path)
+        logger.info("Starting evaluation adapter=%s dataset=%s resume=%s", training.adapter.value, dataset.val.value, resume)
         checkpoint = self._prepare_checkpoint(training, dataset, work_dir, max_samples, resume)
         metrics = self._evaluate_metrics(training, dataset, max_samples, local_files_only, checkpoint)
         report = EvalReport("Fine-tuned", metrics["total_examples"], metrics)
@@ -313,6 +346,7 @@ class QwenEvaluator(BaseEvaluator):
         if checkpoint:
             checkpoint["manifest"]["status"] = "completed"
             _atomic_json(checkpoint["manifest_path"], checkpoint["manifest"])
+        logger.info("Evaluation completed: %d examples", metrics["total_examples"])
         self._print_metrics(metrics, report.model_label)
         return report
 
@@ -329,6 +363,9 @@ class QwenEvaluator(BaseEvaluator):
         """Compare base and fine-tuned models using the same deterministic metrics."""
         import torch
 
+        log_path = self._local_artifact_path(report_target, "report_target").parent / "evaluator.log" if report_target else Path("evaluator.log")
+        _configure_logging(log_path)
+        logger.info("Starting base-vs-fine-tuned comparison adapter=%s dataset=%s", training.adapter.value, dataset.val.value)
         records = self._load_records(dataset, max_samples)
         system_prompt = _load_system_prompt()
         base_model, tokenizer = self.load_model(training, include_adapter=False, local_files_only=local_files_only)
@@ -385,11 +422,23 @@ class QwenEvaluator(BaseEvaluator):
         return metrics
 
     @staticmethod
+    def _evaluation_directory(training: TrainingResult, work_dir: str | Path) -> Path:
+        if training.adapter.type is not ArtifactLocationType.LOCAL_PATH:
+            raise NotImplementedError("work_dir evaluation requires a local adapter")
+        root = Path(work_dir).expanduser().resolve()
+        adapter = Path(training.adapter.value).expanduser().resolve()
+        return root / "evaluation" if adapter == root else root / "evaluation" / adapter.name
+
+    @staticmethod
     def _load_records(dataset: DatasetSplit, max_samples: int | None) -> list[dict[str, Any]]:
         path = QwenEvaluator._local_data_path(dataset.val, "validation split")
+        started = time.perf_counter()
+        logger.info("Reading validation dataset from %s", path)
         with path.open(encoding="utf-8") as stream:
             records = [json.loads(line) for line in stream if line.strip()]
-        return records if max_samples is None else records[:max_samples]
+        records = records if max_samples is None else records[:max_samples]
+        logger.info("Read %d validation records in %.2fs", len(records), time.perf_counter() - started)
+        return records
 
     @staticmethod
     def _run_eval_pass(
@@ -404,6 +453,7 @@ class QwenEvaluator(BaseEvaluator):
         scored: list[tuple[dict[str, Any], dict[str, Any], bool, bool]] = []
         predictions: list[dict[str, Any]] = []
         completed = completed or {}
+        logger.info("Evaluation records: total=%d resumed=%d pending=%d", len(records), len(completed), len(records) - len(completed))
         with tqdm(total=len(records), initial=len(completed), desc="Evaluating", unit="sample") as progress:
             for index, record in enumerate(records):
                 gold = json.loads(record["output"])
@@ -411,9 +461,12 @@ class QwenEvaluator(BaseEvaluator):
                 if prediction is None:
                     if model is None or tokenizer is None:
                         raise RuntimeError("Evaluation has unfinished records but no model was loaded")
+                    logger.info("Generating sample %d/%d", index + 1, len(records))
                     prompt = format_example({**record, "output": ""}, system_prompt)
                     prompt = prompt.rsplit("<|im_start|>assistant\n", 1)[0] + "<|im_start|>assistant\n"
+                    started = time.perf_counter()
                     raw_output = QwenEvaluator._generate_one(model, tokenizer, prompt)
+                    logger.info("Generated sample %d/%d in %.2fs", index + 1, len(records), time.perf_counter() - started)
                     prediction = QwenEvaluator._prediction_record(index, raw_output)
                     if prediction_path:
                         QwenEvaluator._append_prediction(prediction_path, prediction)
@@ -465,10 +518,12 @@ class QwenEvaluator(BaseEvaluator):
 
     @staticmethod
     def _append_prediction(path: Path, prediction: dict[str, Any]) -> None:
+        started = time.perf_counter()
         with path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(prediction, ensure_ascii=False) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
+        logger.info("Checkpointed sample %d to %s in %.2fs", prediction["index"] + 1, path, time.perf_counter() - started)
 
     @staticmethod
     def _prepare_checkpoint(
@@ -488,9 +543,11 @@ class QwenEvaluator(BaseEvaluator):
         root = Path(work_dir).expanduser().resolve()
         adapter = Path(training.adapter.value).expanduser().resolve()
         data_path = QwenEvaluator._local_data_path(dataset.val, "validation split").resolve()
-        directory = root / "evaluation" if adapter == root else root / "evaluation" / adapter.name
+        directory = QwenEvaluator._evaluation_directory(training, root)
         manifest_path = directory / "manifest.json"
         predictions_path = directory / "predictions.jsonl"
+        started = time.perf_counter()
+        logger.info("Fingerprinting dataset and adapter for %s", directory)
         manifest = {
             "version": 1,
             "status": "running",
@@ -501,7 +558,9 @@ class QwenEvaluator(BaseEvaluator):
             "base_model_id": training.base_model_id,
             "max_samples": max_samples,
         }
+        logger.info("Fingerprinting completed in %.2fs", time.perf_counter() - started)
         if manifest_path.exists():
+            logger.info("Reading evaluation manifest from %s", manifest_path)
             existing = json.loads(manifest_path.read_text(encoding="utf-8"))
             expected = {key: value for key, value in manifest.items() if key != "status"}
             actual = {key: existing.get(key) for key in expected}
@@ -518,6 +577,8 @@ class QwenEvaluator(BaseEvaluator):
 
         completed: dict[int, dict[str, Any]] = {}
         if predictions_path.exists():
+            started = time.perf_counter()
+            logger.info("Reading prediction checkpoint from %s", predictions_path)
             with predictions_path.open(encoding="utf-8") as stream:
                 for line in stream:
                     if not line.strip():
@@ -528,6 +589,7 @@ class QwenEvaluator(BaseEvaluator):
                         continue  # a killed process can leave one partial final line
                     if isinstance(item.get("index"), int):
                         completed[item["index"]] = item
+            logger.info("Restored %d prediction records in %.2fs", len(completed), time.perf_counter() - started)
         return {
             "directory": directory,
             "manifest_path": manifest_path,
@@ -553,8 +615,10 @@ class QwenEvaluator(BaseEvaluator):
         if not target:
             return
         path = QwenEvaluator._local_artifact_path(target, "report_target")
+        started = time.perf_counter()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        logger.info("Wrote evaluation report to %s in %.2fs", path, time.perf_counter() - started)
 
     @staticmethod
     def _print_metrics(metrics: dict[str, Any], label: str) -> None:
