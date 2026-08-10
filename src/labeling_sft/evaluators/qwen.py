@@ -423,15 +423,15 @@ class QwenEvaluator(BaseEvaluator):
         return _score_records(scored), predictions
 
     @staticmethod
-    def _generate_one(model: Any, tokenizer: Any, prompt: str, max_new_tokens: int = 4096) -> str:
+    def _generate_one(model: Any, tokenizer: Any, prompt: str, max_length: int = 8192) -> str:
         import torch
 
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=8192 - max_new_tokens)
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=max_length)
         inputs = {key: value.to(model.device) for key, value in inputs.items()}
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=max_new_tokens,
+                max_length=max_length,
                 do_sample=False,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
