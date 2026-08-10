@@ -8,7 +8,9 @@ it can therefore be tested without loading a model or GPU dependencies.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -40,6 +42,38 @@ _SCALAR_FIELDS = (
     ("servings", ("dish", "servings")),
     ("calories", ("dish", "calories_per_serving")),
 )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _adapter_sha256(adapter: Path) -> str:
+    files = [adapter / "adapter_config.json"] + [
+        path for path in (adapter / "adapter_model.safetensors", adapter / "adapter_model.bin")
+        if path.is_file()
+    ]
+    if len(files) == 1:
+        raise FileNotFoundError(f"No adapter weights found in {adapter}")
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.name.encode())
+        digest.update(_sha256(path).encode())
+    return digest.hexdigest()
+
+
+def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(path)
 
 
 def _extract_json(text: str) -> str | None:
@@ -257,12 +291,21 @@ class QwenEvaluator(BaseEvaluator):
         report_target: ArtifactLocation | None = None,
         max_samples: int | None = None,
         local_files_only: bool = False,
+        work_dir: str | Path | None = None,
+        resume: bool = False,
         **kwargs: Any,
     ) -> EvalReport:
-        """Evaluate the fine-tuned model on the validation split."""
-        metrics = self._evaluate_metrics(training, dataset, max_samples, local_files_only)
+        """Evaluate the fine-tuned model, optionally checkpointing in ``work_dir/evaluation``."""
+        checkpoint = self._prepare_checkpoint(training, dataset, work_dir, max_samples, resume)
+        metrics = self._evaluate_metrics(training, dataset, max_samples, local_files_only, checkpoint)
         report = EvalReport("Fine-tuned", metrics["total_examples"], metrics)
-        self._write_report(metrics, report_target)
+        target = report_target or (
+            ArtifactLocation.local(str(checkpoint["directory"] / "report.json")) if checkpoint else None
+        )
+        self._write_report(metrics, target)
+        if checkpoint:
+            checkpoint["manifest"]["status"] = "completed"
+            _atomic_json(checkpoint["manifest_path"], checkpoint["manifest"])
         self._print_metrics(metrics, report.model_label)
         return report
 
@@ -314,10 +357,24 @@ class QwenEvaluator(BaseEvaluator):
         dataset: DatasetSplit,
         max_samples: int | None,
         local_files_only: bool,
+        checkpoint: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         records = self._load_records(dataset, max_samples)
-        model, tokenizer = self.load_model(training, local_files_only=local_files_only)
-        metrics, _predictions = self._run_eval_pass(model, tokenizer, records, load_system_prompt())
+        completed = (
+            {index: item for index, item in checkpoint["completed"].items() if 0 <= index < len(records)}
+            if checkpoint else {}
+        )
+        model = tokenizer = None
+        if len(completed) < len(records):
+            model, tokenizer = self.load_model(training, local_files_only=local_files_only)
+        metrics, _predictions = self._run_eval_pass(
+            model,
+            tokenizer,
+            records,
+            load_system_prompt(),
+            completed=completed,
+            prediction_path=checkpoint["predictions_path"] if checkpoint else None,
+        )
         return metrics
 
     @staticmethod
@@ -329,36 +386,31 @@ class QwenEvaluator(BaseEvaluator):
 
     @staticmethod
     def _run_eval_pass(
-        model: Any,
-        tokenizer: Any,
+        model: Any | None,
+        tokenizer: Any | None,
         records: list[dict[str, Any]],
         system_prompt: str,
+        *,
+        completed: dict[int, dict[str, Any]] | None = None,
+        prediction_path: Path | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         scored: list[tuple[dict[str, Any], dict[str, Any], bool, bool]] = []
         predictions: list[dict[str, Any]] = []
+        completed = completed or {}
         for index, record in enumerate(records):
             gold = json.loads(record["output"])
-            prompt = format_example({**record, "output": ""}, system_prompt)
-            prompt = prompt.rsplit("<|im_start|>assistant\n", 1)[0] + "<|im_start|>assistant\n"
-            raw_output = QwenEvaluator._generate_one(model, tokenizer, prompt)
-            json_text = _extract_json(raw_output)
-            predicted: dict[str, Any] = {}
-            json_valid = False
-            schema_valid = False
-            if json_text:
-                try:
-                    parsed = json.loads(json_text)
-                    if isinstance(parsed, dict):
-                        predicted, json_valid = parsed, True
-                        try:
-                            _VALIDATOR.parse(json_text)
-                            schema_valid = True
-                        except OutputValidationError:
-                            pass
-                except json.JSONDecodeError:
-                    pass
-            scored.append((gold, predicted, json_valid, schema_valid))
-            predictions.append({"index": index, "prediction": predicted, "raw_output": raw_output})
+            prediction = completed.get(index)
+            if prediction is None:
+                if model is None or tokenizer is None:
+                    raise RuntimeError("Evaluation has unfinished records but no model was loaded")
+                prompt = format_example({**record, "output": ""}, system_prompt)
+                prompt = prompt.rsplit("<|im_start|>assistant\n", 1)[0] + "<|im_start|>assistant\n"
+                raw_output = QwenEvaluator._generate_one(model, tokenizer, prompt)
+                prediction = QwenEvaluator._prediction_record(index, raw_output)
+                if prediction_path:
+                    QwenEvaluator._append_prediction(prediction_path, prediction)
+            scored.append((gold, prediction["prediction"], prediction["json_valid"], prediction["schema_valid"]))
+            predictions.append(prediction)
         return _score_records(scored), predictions
 
     @staticmethod
@@ -376,6 +428,104 @@ class QwenEvaluator(BaseEvaluator):
                 eos_token_id=tokenizer.eos_token_id,
             )
         return tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+
+    @staticmethod
+    def _prediction_record(index: int, raw_output: str) -> dict[str, Any]:
+        json_text = _extract_json(raw_output)
+        predicted: dict[str, Any] = {}
+        json_valid = schema_valid = False
+        if json_text:
+            try:
+                parsed = json.loads(json_text)
+                if isinstance(parsed, dict):
+                    predicted, json_valid = parsed, True
+                    try:
+                        _VALIDATOR.parse(json_text)
+                        schema_valid = True
+                    except OutputValidationError:
+                        pass
+            except json.JSONDecodeError:
+                pass
+        return {
+            "index": index,
+            "raw_output": raw_output,
+            "prediction": predicted,
+            "json_valid": json_valid,
+            "schema_valid": schema_valid,
+        }
+
+    @staticmethod
+    def _append_prediction(path: Path, prediction: dict[str, Any]) -> None:
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(prediction, ensure_ascii=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    @staticmethod
+    def _prepare_checkpoint(
+        training: TrainingResult,
+        dataset: DatasetSplit,
+        work_dir: str | Path | None,
+        max_samples: int | None,
+        resume: bool,
+    ) -> dict[str, Any] | None:
+        if work_dir is None:
+            if resume:
+                raise ValueError("resume requires work_dir")
+            return None
+        if training.adapter.type is not ArtifactLocationType.LOCAL_PATH:
+            raise NotImplementedError("work_dir evaluation requires a local adapter")
+
+        root = Path(work_dir).expanduser().resolve()
+        adapter = Path(training.adapter.value).expanduser().resolve()
+        data_path = QwenEvaluator._local_data_path(dataset.val, "validation split").resolve()
+        directory = root / "evaluation" if adapter == root else root / "evaluation" / adapter.name
+        manifest_path = directory / "manifest.json"
+        predictions_path = directory / "predictions.jsonl"
+        manifest = {
+            "version": 1,
+            "status": "running",
+            "dataset_path": str(data_path),
+            "dataset_sha256": _sha256(data_path),
+            "adapter_path": str(adapter),
+            "adapter_sha256": _adapter_sha256(adapter),
+            "base_model_id": training.base_model_id,
+            "max_samples": max_samples,
+        }
+        if manifest_path.exists():
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            expected = {key: value for key, value in manifest.items() if key != "status"}
+            actual = {key: existing.get(key) for key in expected}
+            if actual != expected:
+                raise ValueError("Evaluation checkpoint does not match this dataset, adapter, or configuration")
+            if not resume:
+                raise FileExistsError(f"Evaluation already exists at {directory}; pass resume=True to continue")
+            manifest = existing
+        else:
+            directory.mkdir(parents=True, exist_ok=True)
+            if predictions_path.exists():
+                raise ValueError(f"Found predictions without manifest at {directory}")
+            _atomic_json(manifest_path, manifest)
+
+        completed: dict[int, dict[str, Any]] = {}
+        if predictions_path.exists():
+            with predictions_path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    if not line.strip():
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue  # a killed process can leave one partial final line
+                    if isinstance(item.get("index"), int):
+                        completed[item["index"]] = item
+        return {
+            "directory": directory,
+            "manifest_path": manifest_path,
+            "manifest": manifest,
+            "predictions_path": predictions_path,
+            "completed": completed,
+        }
 
     @staticmethod
     def _local_data_path(location: DataLocation, name: str) -> Path:
@@ -423,25 +573,35 @@ class QwenEvaluator(BaseEvaluator):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--adapter_dir", required=True)
-    parser.add_argument("--val_file", default="data/training/val.jsonl")
+    parser.add_argument("--work_dir", required=True, type=Path, help="Training output directory")
+    parser.add_argument("--model_dir", type=Path, help="Adapter/checkpoint to evaluate (default: work_dir)")
+    parser.add_argument("--val_file", type=Path, help="Validation JSONL (default: work_dir/Alpaca/val.jsonl)")
     parser.add_argument("--base_model_id", default="Qwen/Qwen2.5-3B-Instruct")
-    parser.add_argument("--output_report", default="data/training/eval_report.json")
     parser.add_argument("--compare_base", action="store_true")
     parser.add_argument("--diff_examples", type=int, default=5)
     parser.add_argument("--max_samples", type=int)
     parser.add_argument("--local_files_only", action="store_true")
+    parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
+    work_dir = args.work_dir.expanduser().resolve()
+    model_dir = (args.model_dir or work_dir).expanduser().resolve()
+    val_file = (args.val_file or work_dir / "Alpaca" / "val.jsonl").expanduser().resolve()
     training = TrainingResult(
-        model=ArtifactLocation.local(args.adapter_dir),
-        adapter=ArtifactLocation.local(args.adapter_dir),
+        model=ArtifactLocation.local(str(model_dir)),
+        adapter=ArtifactLocation.local(str(model_dir)),
         base_model_id=args.base_model_id,
     )
-    dataset = DatasetSplit(DataLocation.local(args.val_file), DataLocation.local(args.val_file))
+    dataset = DatasetSplit(DataLocation.local(str(val_file)), DataLocation.local(str(val_file)))
     evaluator = QwenEvaluator(args.base_model_id)
     if args.compare_base:
-        evaluator.compare(training, dataset, ArtifactLocation.local(args.output_report), args.diff_examples,
+        if args.resume:
+            parser.error("--resume is not supported with --compare_base")
+        target = (
+            work_dir / "evaluation" / "comparison.json"
+            if model_dir == work_dir else work_dir / "evaluation" / model_dir.name / "comparison.json"
+        )
+        evaluator.compare(training, dataset, ArtifactLocation.local(str(target)), args.diff_examples,
                           args.max_samples, args.local_files_only)
     else:
-        evaluator.evaluate(training, dataset, ArtifactLocation.local(args.output_report), max_samples=args.max_samples,
-                           local_files_only=args.local_files_only)
+        evaluator.evaluate(training, dataset, max_samples=args.max_samples, local_files_only=args.local_files_only,
+                           work_dir=work_dir, resume=args.resume)
