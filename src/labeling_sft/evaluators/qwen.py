@@ -15,6 +15,8 @@ import os
 import re
 import sys
 import time
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from collections import Counter
 from importlib.resources import files
 from pathlib import Path
@@ -38,6 +40,8 @@ from labeling_sft.trainers.qlora import format_example
 
 logger = logging.getLogger(__name__)
 _VALIDATOR = OutputValidator(mode="finetune")
+_OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-fatbb:v2")
+_OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 _SCALAR_FIELDS = (
     ("name", ("dish", "name")),
     ("dish_type", ("dish", "dish_type")),
@@ -361,38 +365,9 @@ class QwenEvaluator(BaseEvaluator):
         **kwargs: Any,
     ) -> ComparisonReport:
         """Compare base and fine-tuned models using the same deterministic metrics."""
-        import torch
-
-        log_path = self._local_artifact_path(report_target, "report_target").parent / "evaluator.log" if report_target else Path("evaluator.log")
-        _configure_logging(log_path)
-        logger.info("Starting base-vs-fine-tuned comparison adapter=%s dataset=%s", training.adapter.value, dataset.val.value)
-        records = self._load_records(dataset, max_samples)
-        system_prompt = _load_system_prompt()
-        base_model, tokenizer = self.load_model(training, include_adapter=False, local_files_only=local_files_only)
-        base_metrics, base_predictions = self._run_eval_pass(base_model, tokenizer, records, system_prompt)
-        del base_model
-        torch.cuda.empty_cache()
-
-        fine_tuned_model, tokenizer = self.load_model(training, local_files_only=local_files_only)
-        fine_tuned_metrics, fine_tuned_predictions = self._run_eval_pass(
-            fine_tuned_model, tokenizer, records, system_prompt,
-        )
-        del fine_tuned_model
-        torch.cuda.empty_cache()
-
-        self._write_report(
-            {"base_model_id": training.base_model_id, "base": base_metrics, "fine_tuned": fine_tuned_metrics},
-            report_target,
-        )
-        self._print_metrics(base_metrics, "Base")
-        self._print_metrics(fine_tuned_metrics, "Fine-tuned")
-        divergent = self._divergent_examples(base_predictions, fine_tuned_predictions, diff_examples)
-        return ComparisonReport(
-            base_model_id=training.base_model_id,
-            adapter=training.adapter,
-            base=EvalReport("Base", base_metrics["total_examples"], base_metrics),
-            fine_tuned=EvalReport("Fine-tuned", fine_tuned_metrics["total_examples"], fine_tuned_metrics),
-            divergent_examples=divergent,
+        raise NotImplementedError(
+            "Base-vs-adapter comparison requires two Ollama model names; "
+            "the Ollama evaluator currently evaluates only qwen2.5-fatbb:v2."
         )
 
     def _evaluate_metrics(
@@ -408,12 +383,9 @@ class QwenEvaluator(BaseEvaluator):
             {index: item for index, item in checkpoint["completed"].items() if 0 <= index < len(records)}
             if checkpoint else {}
         )
-        model = tokenizer = None
-        if len(completed) < len(records):
-            model, tokenizer = self.load_model(training, local_files_only=local_files_only)
         metrics, _predictions = self._run_eval_pass(
-            model,
-            tokenizer,
+            None,
+            None,
             records,
             _load_system_prompt(),
             completed=completed,
@@ -459,13 +431,11 @@ class QwenEvaluator(BaseEvaluator):
                 gold = json.loads(record["output"])
                 prediction = completed.get(index)
                 if prediction is None:
-                    if model is None or tokenizer is None:
-                        raise RuntimeError("Evaluation has unfinished records but no model was loaded")
                     logger.info("Generating sample %d/%d", index + 1, len(records))
                     prompt = format_example({**record, "output": ""}, system_prompt)
                     prompt = prompt.rsplit("<|im_start|>assistant\n", 1)[0] + "<|im_start|>assistant\n"
                     started = time.perf_counter()
-                    raw_output = QwenEvaluator._generate_one(model, tokenizer, prompt)
+                    raw_output = QwenEvaluator._generate_one(None, None, prompt)
                     logger.info("Generated sample %d/%d in %.2fs", index + 1, len(records), time.perf_counter() - started)
                     prediction = QwenEvaluator._prediction_record(index, raw_output)
                     if prediction_path:
@@ -476,20 +446,40 @@ class QwenEvaluator(BaseEvaluator):
         return _score_records(scored), predictions
 
     @staticmethod
-    def _generate_one(model: Any, tokenizer: Any, prompt: str, max_length: int = 8192) -> str:
-        import torch
-
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=max_length)
-        inputs = {key: value.to(model.device) for key, value in inputs.items()}
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_length=max_length,
-                do_sample=False,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-        return tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+    def _generate_one(model: Any, tokenizer: Any, prompt: str, max_new_tokens: int = 4096) -> str:
+        """Generate through local Ollama; ``model`` and ``tokenizer`` are unused."""
+        payload = json.dumps({
+            "model": _OLLAMA_MODEL,
+            "prompt": prompt,
+            "raw": True,
+            "stream": False,
+            "options": {"temperature": 0, "num_ctx": 8192, "num_predict": max_new_tokens},
+        }).encode("utf-8")
+        request = Request(
+            f"{_OLLAMA_HOST}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=600) as response:
+                result = json.loads(response.read())
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Ollama request failed: HTTP {error.code}: {detail}") from error
+        except URLError as error:
+            raise RuntimeError(f"Cannot reach Ollama at {_OLLAMA_HOST}: {error.reason}") from error
+        output = result.get("response")
+        if not isinstance(output, str) or not output.strip():
+            raise RuntimeError(f"Ollama returned an empty response: {result}")
+        eval_duration = result.get("eval_duration", 0) or 0
+        eval_count = result.get("eval_count", 0) or 0
+        tokens_per_second = eval_count / (eval_duration / 1_000_000_000) if eval_duration else 0.0
+        logger.info(
+            "Ollama completed model=%s prompt_tokens=%s output_tokens=%s eval_tps=%.1f",
+            _OLLAMA_MODEL, result.get("prompt_eval_count", "?"), eval_count, tokens_per_second,
+        )
+        return output.strip()
 
     @staticmethod
     def _prediction_record(index: int, raw_output: str) -> dict[str, Any]:
