@@ -23,7 +23,7 @@ class BaseEvaluator(ABC):
     * :meth:`compare`   — base model vs fine-tuned model side-by-side
 
     Concrete implementations:
-        - :class:`~labeling_sft.evaluators.qwen.QwenEvaluator`
+        - :class:`~labeling_sft.evaluators.ollama_evaluator.OllamaEvaluator`
         - Future: ``GenericEvaluator``, ``BatchEvaluator``, ...
     """
 

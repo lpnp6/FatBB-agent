@@ -55,8 +55,8 @@ src/labeling_sft/
 │   └── local.py                      #   LocalArtifactStore(BaseArtifactStore)
 │
 ├── evaluators/                       # Evaluator 实现族
-│   ├── __init__.py                   #   re-export QwenEvaluator
-│   └── qwen.py                       #   QwenEvaluator(BaseEvaluator)
+│   ├── __init__.py                   #   re-export OllamaEvaluator
+│   └── ollama_evaluator.py            #   OllamaEvaluator(BaseEvaluator)
 │
 ├── system.txt                        # System prompt（不变）
 └── __init__.py                       # 顶层 re-export，保持向后兼容
@@ -552,7 +552,7 @@ class BaseEvaluator(ABC):
         ...
 ```
 
-**现有代码映射**：`evaluate.py` 的 `evaluate()` + `evaluate_with_comparison()` → `QwenEvaluator`。
+**现有代码映射**：`evaluate.py` 的 `evaluate()` + `evaluate_with_comparison()` → `OllamaEvaluator`。
 
 ---
 
@@ -644,11 +644,11 @@ exporters/
 
 ```
 evaluators/
-├── __init__.py    # from .qwen import QwenEvaluator
-└── qwen.py        # QwenEvaluator(BaseEvaluator)
+├── __init__.py    # from .ollama_evaluator import OllamaEvaluator
+└── ollama_evaluator.py  # OllamaEvaluator(BaseEvaluator)
 ```
 
-**`QwenEvaluator`** 将现有 `evaluate.py` 重构为类：
+**`OllamaEvaluator`** 将现有 `evaluate.py` 重构为类：
 
 | 方法 | 内容 |
 |------|------|
@@ -688,7 +688,7 @@ from labeling_sft.configs import QLoRAConfig
 from labeling_sft.dataset_builders import BootstrapDatasetBuilder
 from labeling_sft.trainers import QLoRATrainer
 from labeling_sft.exporters import GGUFExporter
-from labeling_sft.evaluators import QwenEvaluator
+from labeling_sft.evaluators import OllamaEvaluator
 ```
 
 ### 6.2 各实现目录的 `__init__.py`
@@ -782,7 +782,7 @@ result = trainer.train("data/train.jsonl", "data/val.jsonl")
 | **Phase 3** | 创建 `dataset_builders/bootstrap.py`，将 `build_dataset()` 封装为 `BootstrapDatasetBuilder`。 | 低风险 |
 | **Phase 4** | 创建 `trainers/qlora.py`，将 `run_training()` 拆分为 `QLoRATrainer`。 | 中风险 — 训练逻辑核心 |
 | **Phase 5** | 创建 `exporters/gguf.py`，由其内部完成 adapter 合并与转换。 | 低风险 |
-| **Phase 6** | 创建 `evaluators/qwen.py`，将 `evaluate()` + `evaluate_with_comparison()` 封装为 `QwenEvaluator`。 | 低风险 |
+| **Phase 6** | 创建 `evaluators/ollama_evaluator.py`，将 `evaluate()` + `evaluate_with_comparison()` 封装为 `OllamaEvaluator`。 | 低风险 |
 | **Phase 7** | 更新顶层 `__init__.py`，统一 re-export。删除旧 flat 文件（或保留为 thin wrapper 一个版本）。 | 一次性切换 |
 
 每个 Phase 完成后跑现有 CLI 命令验证：

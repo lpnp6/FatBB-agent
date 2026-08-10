@@ -10,7 +10,7 @@ The repository already contains deterministic components for individual phases:
 
 - `labeling.bootstrap.BootstrapOrchestrator` discovers, deduplicates, labels, validates, repairs, and persists records.
 - `labeling_sft.SFTOrchestrator` builds a dataset, trains a model, and exports an artifact.
-- `QwenEvaluator` evaluates a trained model.
+- `OllamaEvaluator` evaluates a deployed Ollama model.
 
 The missing piece is a cross-phase control loop. It must use label quality, review backlog, dataset versions, training artifacts, and evaluation outcomes to decide whether to collect more labels, perform review, train, evaluate, or release a candidate model.
 
@@ -190,7 +190,7 @@ Each state has a small, explicit sequence of output functions. In StateFlow term
 | `BUILD_DATASET` | Freeze a reproducible training input | snapshot accepted labels; build train/validation split | snapshot ID and split statistics |
 | `DATASET_CHECK` | Block invalid training inputs | deterministic schema and split checks | pass/fail report |
 | `TRAIN` | Produce a checkpointed candidate | call `SFTOrchestrator` or trainer | training result and artifact locations |
-| `EVALUATE` | Measure generalization | call `QwenEvaluator` on holdout and regression sets | evaluation report |
+| `EVALUATE` | Measure generalization | call `OllamaEvaluator` on holdout and regression sets | evaluation report |
 | `METRIC_GATE` | Apply release policy | deterministic threshold checks | named metric values and policy version |
 | `ERROR_ANALYSIS` | Propose a bounded remediation path | Agent classifies evidence; Controller validates proposal | categorized failure report |
 | `RELEASE` | Authorize candidate creation | verify gate; require human approval | approval record |
@@ -297,7 +297,7 @@ src/labeling_ops/
 |   |-- labeling.py     # BootstrapOrchestrator adapter
 |   |-- dataset.py      # dataset builder adapter
 |   |-- training.py     # SFTOrchestrator or trainer adapter
-|   |-- evaluation.py   # QwenEvaluator adapter
+|   |-- evaluation.py   # OllamaEvaluator adapter
 |   `-- review.py       # review task adapter
 `-- run.py              # CLI/API composition root
 ```
