@@ -40,8 +40,6 @@ from labeling_sft.trainers.qlora import format_example
 
 logger = logging.getLogger(__name__)
 _VALIDATOR = OutputValidator(mode="finetune")
-_OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-fatbb:v2")
-_OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 _SCALAR_FIELDS = (
     ("name", ("dish", "name")),
     ("dish_type", ("dish", "dish_type")),
@@ -280,8 +278,19 @@ def _score_records(records: list[tuple[dict[str, Any], dict[str, Any], bool, boo
 class QwenEvaluator(BaseEvaluator):
     """Evaluate a Qwen QLoRA adapter with deterministic recipe metrics."""
 
-    def __init__(self, base_model_id: str = "Qwen/Qwen2.5-3B-Instruct") -> None:
+    def __init__(
+        self,
+        base_model_id: str = "Qwen/Qwen2.5-3B-Instruct",
+        ollama_model: str = "qwen2.5-fatbb:v2",
+        ollama_host: str = "http://127.0.0.1:11434",
+    ) -> None:
+        if not ollama_model:
+            raise ValueError("ollama_model must not be empty")
+        if not ollama_host.startswith(("http://", "https://")):
+            raise ValueError("ollama_host must include http:// or https://")
         self._default_base = base_model_id
+        self._ollama_model = ollama_model
+        self._ollama_host = ollama_host.rstrip("/")
 
     def load_model(
         self,
@@ -367,7 +376,7 @@ class QwenEvaluator(BaseEvaluator):
         """Compare base and fine-tuned models using the same deterministic metrics."""
         raise NotImplementedError(
             "Base-vs-adapter comparison requires two Ollama model names; "
-            "the Ollama evaluator currently evaluates only qwen2.5-fatbb:v2."
+            f"the Ollama evaluator currently evaluates only {self._ollama_model}."
         )
 
     def _evaluate_metrics(
@@ -412,8 +421,8 @@ class QwenEvaluator(BaseEvaluator):
         logger.info("Read %d validation records in %.2fs", len(records), time.perf_counter() - started)
         return records
 
-    @staticmethod
     def _run_eval_pass(
+        self,
         model: Any | None,
         tokenizer: Any | None,
         records: list[dict[str, Any]],
@@ -435,7 +444,7 @@ class QwenEvaluator(BaseEvaluator):
                     prompt = format_example({**record, "output": ""}, system_prompt)
                     prompt = prompt.rsplit("<|im_start|>assistant\n", 1)[0] + "<|im_start|>assistant\n"
                     started = time.perf_counter()
-                    raw_output = QwenEvaluator._generate_one(None, None, prompt)
+                    raw_output = self._generate_one(None, None, prompt)
                     logger.info("Generated sample %d/%d in %.2fs", index + 1, len(records), time.perf_counter() - started)
                     prediction = QwenEvaluator._prediction_record(index, raw_output)
                     if prediction_path:
@@ -445,18 +454,17 @@ class QwenEvaluator(BaseEvaluator):
                 predictions.append(prediction)
         return _score_records(scored), predictions
 
-    @staticmethod
-    def _generate_one(model: Any, tokenizer: Any, prompt: str, max_new_tokens: int = 4096) -> str:
+    def _generate_one(self, model: Any, tokenizer: Any, prompt: str, max_new_tokens: int = 4096) -> str:
         """Generate through local Ollama; ``model`` and ``tokenizer`` are unused."""
         payload = json.dumps({
-            "model": _OLLAMA_MODEL,
+            "model": self._ollama_model,
             "prompt": prompt,
             "raw": True,
             "stream": False,
             "options": {"temperature": 0, "num_ctx": 8192, "num_predict": max_new_tokens},
         }).encode("utf-8")
         request = Request(
-            f"{_OLLAMA_HOST}/api/generate",
+            f"{self._ollama_host}/api/generate",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -468,7 +476,7 @@ class QwenEvaluator(BaseEvaluator):
             detail = error.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"Ollama request failed: HTTP {error.code}: {detail}") from error
         except URLError as error:
-            raise RuntimeError(f"Cannot reach Ollama at {_OLLAMA_HOST}: {error.reason}") from error
+            raise RuntimeError(f"Cannot reach Ollama at {self._ollama_host}: {error.reason}") from error
         output = result.get("response")
         if not isinstance(output, str) or not output.strip():
             raise RuntimeError(f"Ollama returned an empty response: {result}")
@@ -477,7 +485,7 @@ class QwenEvaluator(BaseEvaluator):
         tokens_per_second = eval_count / (eval_duration / 1_000_000_000) if eval_duration else 0.0
         logger.info(
             "Ollama completed model=%s prompt_tokens=%s output_tokens=%s eval_tps=%.1f",
-            _OLLAMA_MODEL, result.get("prompt_eval_count", "?"), eval_count, tokens_per_second,
+            self._ollama_model, result.get("prompt_eval_count", "?"), eval_count, tokens_per_second,
         )
         return output.strip()
 
@@ -640,6 +648,8 @@ if __name__ == "__main__":
     parser.add_argument("--model_dir", type=Path, help="Adapter/checkpoint to evaluate (default: work_dir)")
     parser.add_argument("--val_file", type=Path, help="Validation JSONL (default: work_dir/Alpaca/val.jsonl)")
     parser.add_argument("--base_model_id", default="Qwen/Qwen2.5-3B-Instruct")
+    parser.add_argument("--ollama_model", default="qwen2.5-fatbb:v2")
+    parser.add_argument("--ollama_host", default="http://127.0.0.1:11434")
     parser.add_argument("--compare_base", action="store_true")
     parser.add_argument("--diff_examples", type=int, default=5)
     parser.add_argument("--max_samples", type=int)
@@ -655,7 +665,7 @@ if __name__ == "__main__":
         base_model_id=args.base_model_id,
     )
     dataset = DatasetSplit(DataLocation.local(str(val_file)), DataLocation.local(str(val_file)))
-    evaluator = QwenEvaluator(args.base_model_id)
+    evaluator = QwenEvaluator(args.base_model_id, args.ollama_model, args.ollama_host)
     if args.compare_base:
         if args.resume:
             parser.error("--resume is not supported with --compare_base")
