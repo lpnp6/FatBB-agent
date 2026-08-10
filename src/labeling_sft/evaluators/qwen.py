@@ -13,6 +13,7 @@ import json
 import os
 import re
 from collections import Counter
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,7 @@ from labeling_sft.contracts import (
     TrainingResult,
 )
 from labeling_sft.interfaces.evaluator import BaseEvaluator
-from labeling_sft.trainers.qlora import format_example, load_system_prompt
+from labeling_sft.trainers.qlora import format_example
 
 _VALIDATOR = OutputValidator(mode="finetune")
 _SCALAR_FIELDS = (
@@ -76,6 +77,10 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
         stream.flush()
         os.fsync(stream.fileno())
     temporary.replace(path)
+
+
+def _load_system_prompt() -> str:
+    return files("labeling.prompts").joinpath("system.txt").read_text(encoding="utf-8").strip()
 
 
 def _extract_json(text: str) -> str | None:
@@ -325,7 +330,7 @@ class QwenEvaluator(BaseEvaluator):
         import torch
 
         records = self._load_records(dataset, max_samples)
-        system_prompt = load_system_prompt()
+        system_prompt = _load_system_prompt()
         base_model, tokenizer = self.load_model(training, include_adapter=False, local_files_only=local_files_only)
         base_metrics, base_predictions = self._run_eval_pass(base_model, tokenizer, records, system_prompt)
         del base_model
@@ -373,7 +378,7 @@ class QwenEvaluator(BaseEvaluator):
             model,
             tokenizer,
             records,
-            load_system_prompt(),
+            _load_system_prompt(),
             completed=completed,
             prediction_path=checkpoint["predictions_path"] if checkpoint else None,
         )
