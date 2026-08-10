@@ -16,6 +16,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from tqdm import tqdm
+
 from labeling.utils.validator import OutputValidationError, OutputValidator
 from labeling_sft.contracts import (
     ArtifactLocation,
@@ -397,20 +399,22 @@ class QwenEvaluator(BaseEvaluator):
         scored: list[tuple[dict[str, Any], dict[str, Any], bool, bool]] = []
         predictions: list[dict[str, Any]] = []
         completed = completed or {}
-        for index, record in enumerate(records):
-            gold = json.loads(record["output"])
-            prediction = completed.get(index)
-            if prediction is None:
-                if model is None or tokenizer is None:
-                    raise RuntimeError("Evaluation has unfinished records but no model was loaded")
-                prompt = format_example({**record, "output": ""}, system_prompt)
-                prompt = prompt.rsplit("<|im_start|>assistant\n", 1)[0] + "<|im_start|>assistant\n"
-                raw_output = QwenEvaluator._generate_one(model, tokenizer, prompt)
-                prediction = QwenEvaluator._prediction_record(index, raw_output)
-                if prediction_path:
-                    QwenEvaluator._append_prediction(prediction_path, prediction)
-            scored.append((gold, prediction["prediction"], prediction["json_valid"], prediction["schema_valid"]))
-            predictions.append(prediction)
+        with tqdm(total=len(records), initial=len(completed), desc="Evaluating", unit="sample") as progress:
+            for index, record in enumerate(records):
+                gold = json.loads(record["output"])
+                prediction = completed.get(index)
+                if prediction is None:
+                    if model is None or tokenizer is None:
+                        raise RuntimeError("Evaluation has unfinished records but no model was loaded")
+                    prompt = format_example({**record, "output": ""}, system_prompt)
+                    prompt = prompt.rsplit("<|im_start|>assistant\n", 1)[0] + "<|im_start|>assistant\n"
+                    raw_output = QwenEvaluator._generate_one(model, tokenizer, prompt)
+                    prediction = QwenEvaluator._prediction_record(index, raw_output)
+                    if prediction_path:
+                        QwenEvaluator._append_prediction(prediction_path, prediction)
+                    progress.update()
+                scored.append((gold, prediction["prediction"], prediction["json_valid"], prediction["schema_valid"]))
+                predictions.append(prediction)
         return _score_records(scored), predictions
 
     @staticmethod
