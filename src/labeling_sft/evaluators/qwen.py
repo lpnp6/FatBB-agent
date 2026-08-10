@@ -282,7 +282,7 @@ class QwenEvaluator(BaseEvaluator):
         self,
         base_model_id: str = "Qwen/Qwen2.5-3B-Instruct",
         ollama_model: str = "qwen2.5-fatbb:v2",
-        ollama_host: str = "http://127.0.0.1:11434",
+        ollama_host: str = "http://127.0.0.1:8000",
     ) -> None:
         if not ollama_model:
             raise ValueError("ollama_model must not be empty")
@@ -649,7 +649,7 @@ if __name__ == "__main__":
     parser.add_argument("--val_file", type=Path, help="Validation JSONL (default: work_dir/Alpaca/val.jsonl)")
     parser.add_argument("--base_model_id", default="Qwen/Qwen2.5-3B-Instruct")
     parser.add_argument("--ollama_model", default="qwen2.5-fatbb:v2")
-    parser.add_argument("--ollama_host", default="http://127.0.0.1:11434")
+    parser.add_argument("--ollama_host", default="http://127.0.0.1:8000"),
     parser.add_argument("--compare_base", action="store_true")
     parser.add_argument("--diff_examples", type=int, default=5)
     parser.add_argument("--max_samples", type=int)
