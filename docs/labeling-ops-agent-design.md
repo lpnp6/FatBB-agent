@@ -52,7 +52,7 @@ User request / scheduled trigger
               v
     +-----------------------+
     |  StateFlow Controller |
-    | current state + delta  |
+    | current state + delta |
     +-----------+-----------+
                 |
                 | enter state and run its output functions (Omega)
