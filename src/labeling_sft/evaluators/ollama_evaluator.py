@@ -282,7 +282,9 @@ class OllamaEvaluator(BaseEvaluator):
         self,
         base_model_id: str = "Qwen/Qwen2.5-3B-Instruct",
         ollama_model: str = "qwen2.5-fatbb:v2",
-        ollama_host: str = "http://127.0.0.1:8000",
+        ollama_host: str = "http://127.0.0.1:11434",
+        ollama_num_gpu: int = 99,
+        ollama_num_ctx: int = 8192,
     ) -> None:
         if not ollama_model:
             raise ValueError("ollama_model must not be empty")
@@ -291,6 +293,8 @@ class OllamaEvaluator(BaseEvaluator):
         self._default_base = base_model_id
         self._ollama_model = ollama_model
         self._ollama_host = ollama_host.rstrip("/")
+        self._ollama_num_gpu = ollama_num_gpu
+        self._ollama_num_ctx = ollama_num_ctx
 
     def load_model(
         self,
@@ -425,14 +429,21 @@ class OllamaEvaluator(BaseEvaluator):
                 predictions.append(prediction)
         return _score_records(scored), predictions
 
-    def _generate_one(self, model: Any, tokenizer: Any, prompt: str, max_new_tokens: int = 4096) -> str:
+    def _generate_one(self, model: Any, tokenizer: Any, prompt: str, max_new_tokens: int | None = None) -> str:
         """Generate through local Ollama; ``model`` and ``tokenizer`` are unused."""
+        if max_new_tokens is None:
+            max_new_tokens = 8192
         payload = json.dumps({
             "model": self._ollama_model,
             "prompt": prompt,
             "raw": True,
             "stream": False,
-            "options": {"temperature": 0, "num_ctx": 8192, "num_predict": max_new_tokens},
+            "options": {
+                "temperature": 0,
+                "num_ctx": self._ollama_num_ctx,
+                "num_predict": max_new_tokens,
+                "num_gpu": self._ollama_num_gpu,
+            },
         }).encode("utf-8")
         request = Request(
             f"{self._ollama_host}/api/generate",
@@ -527,7 +538,7 @@ class OllamaEvaluator(BaseEvaluator):
             "base_model_id": training.base_model_id,
             "ollama_model": self._ollama_model,
             "ollama_host": self._ollama_host,
-            "ollama_options": {"temperature": 0, "num_ctx": 8192, "num_predict": 4096},
+            "ollama_options": {"temperature": 0, "num_ctx": self._ollama_num_ctx, "num_predict": -1, "num_gpu": self._ollama_num_gpu},
             "max_samples": max_samples,
         }
         logger.info("Fingerprinting completed in %.2fs", time.perf_counter() - started)
@@ -622,8 +633,10 @@ if __name__ == "__main__":
     parser.add_argument("--model_dir", type=Path, help="Adapter/checkpoint to evaluate (default: work_dir)")
     parser.add_argument("--val_file", type=Path, help="Validation JSONL (default: work_dir/Alpaca/val.jsonl)")
     parser.add_argument("--base_model_id", default="Qwen/Qwen2.5-3B-Instruct")
-    parser.add_argument("--ollama_model", default="qwen2.5-fatbb:v2")
-    parser.add_argument("--ollama_host", default="http://127.0.0.1:8000"),
+    parser.add_argument("--ollama_model", default="qwen2.5-fatbb:v2-gpu")
+    parser.add_argument("--ollama_host", default="http://127.0.0.1:11434")
+    parser.add_argument("--ollama_num_gpu", type=int, default=99, help="Number of layers to offload to GPU (default: 99 = all)")
+    parser.add_argument("--ollama_num_ctx", type=int, default=8192, help="Context window size (default: 8192)")
     parser.add_argument("--compare_base", action="store_true")
     parser.add_argument("--diff_examples", type=int, default=5)
     parser.add_argument("--max_samples", type=int)
@@ -639,7 +652,7 @@ if __name__ == "__main__":
         base_model_id=args.base_model_id,
     )
     dataset = DatasetSplit(DataLocation.local(str(val_file)), DataLocation.local(str(val_file)))
-    evaluator = OllamaEvaluator(args.base_model_id, args.ollama_model, args.ollama_host)
+    evaluator = OllamaEvaluator(args.base_model_id, args.ollama_model, args.ollama_host, args.ollama_num_gpu, args.ollama_num_ctx)
     if args.compare_base:
         if args.resume:
             parser.error("--resume is not supported with --compare_base")
