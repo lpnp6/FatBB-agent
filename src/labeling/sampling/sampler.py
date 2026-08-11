@@ -7,10 +7,11 @@ from pathlib import Path
 
 from ..interfaces.checkpoint_store import CheckpointStore
 from ..interfaces.dedup_store import DedupStore, HashStatus
+from ..interfaces.sampler import Sampler as BaseSampler
 from ..utils.uri_resolver import URIResolver
 
 
-class Sampler:
+class Sampler(BaseSampler):
     """Discover files via a URIResolver, deduplicate via DedupStore, and stream
     unique items in batches.
 
