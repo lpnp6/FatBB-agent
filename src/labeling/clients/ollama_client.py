@@ -7,11 +7,29 @@ import logging
 from time import perf_counter
 from typing import Any
 
-from ..interfaces.labeling_client import LabelingClient
+from ..interfaces.labeling_client import LabelingClient, TransientError
 from ..interfaces.prompt_builder import PromptBuilder
 from ..models.common import ExtractionResult, TokenUsage
 
+# HTTP status codes that indicate a transient infrastructure issue rather
+# than a permanent data problem.  Items that fail with these codes should
+# be reset to PENDING and retried on the next pipeline run.
+_TRANSIENT_HTTP_CODES: frozenset[int] = frozenset({404, 502, 503, 504})
+
 logger = logging.getLogger(__name__)
+
+
+def _wrap_transient(exc: Exception) -> None:
+    """If *exc* is an HTTP error with a transient status code, raise
+    :class:`TransientError` so the orchestrator resets the item to PENDING
+    instead of permanently rejecting it.
+
+    Uses duck-typing on ``status_code`` so the module does not need a
+    hard import of ``ollama`` at the top level.
+    """
+    status_code: int = getattr(exc, "status_code", -1)
+    if status_code in _TRANSIENT_HTTP_CODES:
+        raise TransientError(str(exc), status_code=status_code) from exc
 
 
 def _val(obj: Any, field: str, default: Any = None) -> Any:
@@ -128,7 +146,8 @@ class OllamaLabelingClient(LabelingClient):
                             "temperature": self._temperature,
                         },
                     )
-                except Exception:
+                except Exception as exc:
+                    _wrap_transient(exc)
                     logger.exception("Labeling request failed model=%s", self._model)
                     raise
 
@@ -204,7 +223,8 @@ class OllamaLabelingClient(LabelingClient):
                             "temperature": self._temperature,
                         },
                     )
-                except Exception:
+                except Exception as exc:
+                    _wrap_transient(exc)
                     logger.exception("Repair request failed model=%s", self._model)
                     raise
 

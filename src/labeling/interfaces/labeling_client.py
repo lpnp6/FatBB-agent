@@ -7,6 +7,21 @@ from abc import ABC, abstractmethod
 from ..models.common import ExtractionResult
 
 
+class TransientError(Exception):
+    """Infrastructure error that should NOT cause permanent item rejection.
+
+    Raised by :class:`LabelingClient` implementations when the model backend
+    returns an HTTP error that is likely temporary — 404 (model loading),
+    502 (bad gateway), 503 (server busy), etc.  The orchestrator catches
+    this and resets the item to PENDING so it is retried on the next
+    pipeline run instead of being permanently rejected.
+    """
+
+    def __init__(self, message: str, status_code: int = -1) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class LabelingClient(ABC):
     """Call a model to extract structured food KG data from recipe markdown.
 

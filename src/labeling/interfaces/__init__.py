@@ -7,7 +7,7 @@ these ABCs. Concrete implementations are injected at the composition root
 
 from .checkpoint_store import CheckpointStore, ItemStatus
 from .dedup_store import DedupEntry, DedupStore, HashStatus
-from .labeling_client import LabelingClient
+from .labeling_client import LabelingClient, TransientError
 from .orchestrator import Orchestrator
 from .prompt_builder import PromptBuilder
 from .sampler import Sampler
@@ -23,5 +23,6 @@ __all__ = [
     "Orchestrator",
     "PromptBuilder",
     "Sampler",
+    "TransientError",
     "WorkQueue",
 ]

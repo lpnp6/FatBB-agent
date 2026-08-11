@@ -16,7 +16,7 @@ from typing import Any
 
 from ..interfaces.checkpoint_store import CheckpointStore
 from ..interfaces.dedup_store import DedupEntry, DedupStore, HashStatus
-from ..interfaces.labeling_client import LabelingClient
+from ..interfaces.labeling_client import LabelingClient, TransientError
 from ..interfaces.orchestrator import Orchestrator
 from ..interfaces.sampler import Sampler
 from ..utils.validator import OutputValidationError, OutputValidator
@@ -142,7 +142,9 @@ class ProductionOrchestrator(Orchestrator):
     ) -> tuple[str, DedupEntry | None]:
         """Label, validate, optionally repair.  Returns staged dedup entry.
 
-        On failure after all retries the checkpoint is marked rejected.
+        On permanent failure after all retries the checkpoint is marked
+        rejected.  On transient infrastructure errors (404, 502, 503, 504)
+        the item is reset to PENDING so it is retried on the next run.
         """
         item_id = str(item["source_id"])
         hash_ = str(item["recipe_card_hash"])
@@ -150,12 +152,21 @@ class ProductionOrchestrator(Orchestrator):
         source_id = item_id
 
         last_error = ""
+        _transient = False
         for attempt_num in range(self._retries + 1):
             parsed = None
             result = None
             try:
                 result = await self._client.label(raw_text)
                 parsed = self._validator.parse(result.raw_output)
+            except TransientError as error:
+                _transient = True
+                last_error = str(error)
+                logger.warning(
+                    "Transient infrastructure error id=%s attempt=%d status=%d error=%s",
+                    item_id, attempt_num + 1, error.status_code, last_error,
+                )
+                continue
             except OutputValidationError as error:
                 last_error = str(error)
                 logger.warning(
@@ -173,6 +184,14 @@ class ProductionOrchestrator(Orchestrator):
                             item_id, attempt_num + 1,
                         )
                         result = repaired
+                    except TransientError as repair_error:
+                        _transient = True
+                        last_error = str(repair_error)
+                        logger.warning(
+                            "Repair transient error id=%s attempt=%d status=%d error=%s",
+                            item_id, attempt_num + 1, repair_error.status_code, last_error,
+                        )
+                        continue
                     except Exception as repair_error:
                         logger.warning(
                             "Repair failed id=%s attempt=%d error=%s",
@@ -207,6 +226,14 @@ class ProductionOrchestrator(Orchestrator):
             )
 
         # All retries exhausted.
+        if _transient:
+            logger.error(
+                "Labeling deferred (transient) id=%s error=%s",
+                item_id, last_error,
+            )
+            await self._checkpoint.mark_pending(item_id)
+            return "deferred", None
+
         logger.error(
             "Labeling exhausted retries id=%s error=%s", item_id, last_error,
         )
