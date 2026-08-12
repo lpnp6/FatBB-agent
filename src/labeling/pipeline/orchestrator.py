@@ -54,6 +54,7 @@ class ProductionOrchestrator(Orchestrator):
         checkpoint: CheckpointStore,
         validator: OutputValidator | None = None,
         retries: int = 2,
+        repair: bool = True,
     ) -> None:
         self._client = client
         self._dedup_store = dedup_store
@@ -61,6 +62,7 @@ class ProductionOrchestrator(Orchestrator):
         self._checkpoint = checkpoint
         self._validator = validator or OutputValidator(mode="production")
         self._retries = retries
+        self._repair = repair
 
     # ------------------------------------------------------------------
     # Orchestrator interface
@@ -152,7 +154,6 @@ class ProductionOrchestrator(Orchestrator):
         source_id = item_id
 
         last_error = ""
-        _transient = False
         for attempt_num in range(self._retries + 1):
             parsed = None
             result = None
@@ -160,7 +161,6 @@ class ProductionOrchestrator(Orchestrator):
                 result = await self._client.label(raw_text)
                 parsed = self._validator.parse(result.raw_output)
             except TransientError as error:
-                _transient = True
                 last_error = str(error)
                 logger.warning(
                     "Transient infrastructure error id=%s attempt=%d status=%d error=%s",
@@ -173,7 +173,7 @@ class ProductionOrchestrator(Orchestrator):
                     "Labeling validation failed id=%s attempt=%d error=%s",
                     item_id, attempt_num + 1, last_error,
                 )
-                if result is not None:
+                if result is not None and self._repair:
                     try:
                         repaired = await self._client.repair(
                             result.raw_output, last_error,
@@ -185,7 +185,6 @@ class ProductionOrchestrator(Orchestrator):
                         )
                         result = repaired
                     except TransientError as repair_error:
-                        _transient = True
                         last_error = str(repair_error)
                         logger.warning(
                             "Repair transient error id=%s attempt=%d status=%d error=%s",
@@ -225,17 +224,12 @@ class ProductionOrchestrator(Orchestrator):
                 output=json.dumps(parsed.normalized_json, ensure_ascii=False),
             )
 
-        # All retries exhausted.
-        if _transient:
-            logger.error(
-                "Labeling deferred (transient) id=%s error=%s",
-                item_id, last_error,
-            )
-            await self._checkpoint.mark_pending(item_id)
-            return "deferred", None
-
+        # All retries exhausted — reset to PENDING so the item is
+        # retried on the next pipeline run.  The IN_FLIGHT dedup entry
+        # is cleaned up by expire_stale() at the start of the next run.
         logger.error(
-            "Labeling exhausted retries id=%s error=%s", item_id, last_error,
+            "Labeling exhausted retries id=%s error=%s — resetting to PENDING",
+            item_id, last_error,
         )
-        await self._checkpoint.mark_rejected(item_id, last_error)
+        await self._checkpoint.mark_pending(item_id)
         return "failed", None

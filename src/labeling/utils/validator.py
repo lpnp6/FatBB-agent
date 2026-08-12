@@ -25,13 +25,20 @@ class OutputValidationError(ValueError):
     """The model returned JSON that does not match the labeling contract."""
 
 
-def _enum(enum_type: type, value: Any, field: str) -> Any:
+def _enum(enum_type: type, value: Any, field: str, *, mode: str = "finetune") -> Any:
     if value is None:
         return None
     try:
         return enum_type(value)
-    except ValueError as error:
-        raise OutputValidationError(f"{field}: invalid value {value!r}") from error
+    except ValueError:
+        if mode == "production":
+            # Silently fall back: prefer "other" if the enum defines it,
+            # otherwise drop the field (None).
+            try:
+                return enum_type("other")
+            except ValueError:
+                return None
+        raise OutputValidationError(f"{field}: invalid value {value!r}") from None
 
 
 def _mapping(value: Any, field: str) -> dict[str, Any]:
@@ -132,17 +139,18 @@ class OutputValidator:
         )
 
     def _dish(self, value: dict[str, Any]) -> Dish:
+        _m = self._mode
         steps = []
         for step in _list(value.get("cooking_steps"), "dish.cooking_steps"):
             item = _mapping(step, "dish.cooking_steps[]")
             steps.append(CookingStep(
                 order=int(item["order"]),
-                method=_enum(CookingMethod, item["method"], "cooking_steps.method").value,
+                method=_enum(CookingMethod, item["method"], "cooking_steps.method", mode=_m).value,
                 method_name=_string(item["method_name"], "cooking_steps.method_name", required=True),
                 ingredient_refs=[_string(ref, "cooking_steps.ingredient_refs[]", required=True) for ref in _list(item.get("ingredient_refs"), "cooking_steps.ingredient_refs")],
                 note=_string(item.get("note"), "cooking_steps.note"),
                 duration_min=item.get("duration_min"),
-                heat_level=_enum(HeatLevel, item.get("heat_level"), "cooking_steps.heat_level"),
+                heat_level=_enum(HeatLevel, item.get("heat_level"), "cooking_steps.heat_level", mode=_m),
             ))
         cuisine_value = value.get("cuisine")
         cuisine = None if cuisine_value is None else CuisineRef(
@@ -153,11 +161,11 @@ class OutputValidator:
         return Dish(
             name=_string(value.get("name"), "dish.name", required=True),
             aliases=[_string(alias, "dish.aliases[]", required=True) for alias in _list(value.get("aliases"), "dish.aliases")],
-            dish_type=_enum(DishType, value.get("dish_type"), "dish.dish_type"),
-            taste_profile=[_enum(TasteProfile, tag, "dish.taste_profile[]").value for tag in _list(value.get("taste_profile"), "dish.taste_profile")],
-            dietary=[_enum(DietaryTag, tag, "dish.dietary[]").value for tag in _list(value.get("dietary"), "dish.dietary")],
+            dish_type=_enum(DishType, value.get("dish_type"), "dish.dish_type", mode=_m),
+            taste_profile=[e.value for e in (_enum(TasteProfile, tag, "dish.taste_profile[]", mode=_m) for tag in _list(value.get("taste_profile"), "dish.taste_profile")) if e is not None],
+            dietary=[e.value for e in (_enum(DietaryTag, tag, "dish.dietary[]", mode=_m) for tag in _list(value.get("dietary"), "dish.dietary")) if e is not None],
             cooking_time_min=value.get("cooking_time_min"), prep_time_min=value.get("prep_time_min"), total_time_min=value.get("total_time_min"),
-            difficulty=_enum(Difficulty, value.get("difficulty"), "dish.difficulty"), servings=value.get("servings"),
+            difficulty=_enum(Difficulty, value.get("difficulty"), "dish.difficulty", mode=_m), servings=value.get("servings"),
             calories_per_serving=value.get("calories_per_serving"), description=_string(value.get("description"), "dish.description"),
             cooking_steps=steps, cuisine=cuisine,
         )
@@ -167,7 +175,7 @@ class OutputValidator:
         amount_normalized = None if normalized is None else AmountNormalized(**_mapping(normalized, "ingredient.amount_normalized"))
         return Ingredient(
             name=_string(value.get("name"), "ingredient.name", required=True),
-            category=_enum(IngredientCategory, value.get("category"), "ingredient.category"),
+            category=_enum(IngredientCategory, value.get("category"), "ingredient.category", mode=self._mode),
             amount=_string(value.get("amount"), "ingredient.amount", required=True), amount_normalized=amount_normalized,
             is_essential=value.get("is_essential"), preparation=_string(value.get("preparation"), "ingredient.preparation"), notes=_string(value.get("notes"), "ingredient.notes"),
         )
@@ -179,21 +187,22 @@ class OutputValidator:
         return DishRelation(
             from_dish=_string(value.get("from_dish"), "dish_relations.from_dish", required=True),
             to_dish=_string(value.get("to_dish"), "dish_relations.to_dish", required=True), relation=relation,
-            variant_type=_enum(VariantType, value.get("variant_type"), "dish_relations.variant_type"),
+            variant_type=_enum(VariantType, value.get("variant_type"), "dish_relations.variant_type", mode=self._mode),
             context=_string(value.get("context"), "dish_relations.context"), note=_string(value.get("note"), "dish_relations.note"),
         )
 
     def _ingredient_relation(self, value: dict[str, Any]) -> IngredientRelation:
+        _m = self._mode
         relation = _string(value.get("relation"), "ingredient_relations.relation", required=True)
         if relation not in {"complements", "substitutes", "makes"}:
             raise OutputValidationError(f"ingredient_relations.relation: invalid value {relation!r}")
         return IngredientRelation(
             from_ingredient=_string(value.get("from_ingredient"), "ingredient_relations.from_ingredient", required=True),
             to_ingredient=_string(value.get("to_ingredient"), "ingredient_relations.to_ingredient", required=True), relation=relation,
-            strength=_enum(ComplementStrength, value.get("strength"), "ingredient_relations.strength"),
+            strength=_enum(ComplementStrength, value.get("strength"), "ingredient_relations.strength", mode=_m),
             context=_string(value.get("context"), "ingredient_relations.context"),
-            direction=_enum(SubstituteDirection, value.get("direction"), "ingredient_relations.direction"),
-            impact=_enum(SubstituteImpact, value.get("impact"), "ingredient_relations.impact"),
+            direction=_enum(SubstituteDirection, value.get("direction"), "ingredient_relations.direction", mode=_m),
+            impact=_enum(SubstituteImpact, value.get("impact"), "ingredient_relations.impact", mode=_m),
             condition=_string(value.get("condition"), "ingredient_relations.condition"), process=_string(value.get("process"), "ingredient_relations.process"),
             is_reversible=bool(value.get("is_reversible", False)), note=_string(value.get("note"), "ingredient_relations.note"),
         )

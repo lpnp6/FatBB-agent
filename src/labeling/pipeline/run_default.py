@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default="data/production")
     parser.add_argument(
         "--model",
-        default=os.environ.get("OLLAMA_MODEL", "qwen2.5-3b-fatbb-v1"),
+        default=os.environ.get("OLLAMA_MODEL", "qwen2.5-fatbb:v2-gpu"),
     )
     parser.add_argument(
         "--host",
@@ -46,11 +46,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-concurrent", type=int, default=1)
     parser.add_argument("--num-ctx", type=int, default=16384)
-    parser.add_argument("--num-predict", type=int, default=8192)
+    parser.add_argument("--num-predict", type=int, default=9216)
     parser.add_argument("--temperature", type=float, default=0.1)
-    parser.add_argument("--batch-size", type=int, default=50)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--threshold", type=int, default=3)
+    parser.add_argument(
+        "--no-repair", action="store_true",
+        help="Skip repair on validation failure — just re-label instead.",
+    )
     return parser.parse_args()
 
 
@@ -68,6 +72,7 @@ async def run_default(
     batch_size: int,
     retries: int,
     threshold: int,
+    repair: bool = True,
 ) -> dict[str, Any]:
     """Assemble and run the standard local-files / Ollama labeling pipeline."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -87,10 +92,10 @@ async def run_default(
     logger.info(
         "Starting production pipeline: base_dir=%s target=%d output_dir=%s "
         "model=%s host=%s max_concurrent=%d num_ctx=%d num_predict=%d "
-        "batch_size=%d retries=%d threshold=%d",
+        "batch_size=%d retries=%d threshold=%d repair=%s",
         base_dir, target, output_dir,
         model, host, max_concurrent, num_ctx, num_predict,
-        batch_size, retries, threshold,
+        batch_size, retries, threshold, repair,
     )
 
     source_dir = Path(base_dir).expanduser().resolve()
@@ -120,6 +125,7 @@ async def run_default(
             sampler=sampler,
             checkpoint=checkpoint,
             retries=retries,
+            repair=repair,
             validator=OutputValidator(mode="production"),
         )
         return await orchestrator.run(source_dir, target)
@@ -142,6 +148,7 @@ def main() -> None:
         batch_size=args.batch_size,
         retries=args.retries,
         threshold=args.threshold,
+        repair=not args.no_repair,
     ))
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
