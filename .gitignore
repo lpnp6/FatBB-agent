@@ -32,7 +32,8 @@ convert_hf_to_gguf.py
 test_label.py
 
 *.sqlite
-
+*.sqlite-shm
+*.sqlite-wal
 tests/
 
 configs/
