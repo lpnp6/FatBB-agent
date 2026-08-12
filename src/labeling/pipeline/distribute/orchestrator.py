@@ -1,4 +1,4 @@
-"""Distributed producer orchestration contracts.
+"""Distributed producer — discover, deduplicate, enqueue batches.
 
 This module keeps the existing sampler, deduplication, and checkpoint
 interfaces.  It only adds the queue boundary needed to hand work to remote
@@ -10,11 +10,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..interfaces.checkpoint_store import CheckpointStore
-from ..interfaces.dedup_store import DedupEntry, DedupStore, HashStatus
-from ..interfaces.orchestrator import Orchestrator
-from ..interfaces.sampler import Sampler
-from ..interfaces.work_queue import WorkQueue
+from ...interfaces.checkpoint_store import CheckpointStore
+from ...interfaces.dedup_store import DedupEntry, DedupStore, HashStatus
+from ...interfaces.orchestrator import Orchestrator
+from ...interfaces.sampler import Sampler
+from ...interfaces.work_queue import WorkQueue
 
 
 class DistributedProductionOrchestrator(Orchestrator):

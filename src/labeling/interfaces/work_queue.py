@@ -32,17 +32,17 @@ class WorkQueue(ABC):
         ...
 
     @abstractmethod
-    async def submit_result(
-        self, task: dict[str, Any], result: DedupEntry,
+    async def submit_results(
+        self, outcomes: list[tuple[dict[str, Any], DedupEntry]],
     ) -> None:
-        """Persist a validated result, then mark and acknowledge its task."""
+        """Persist validated results, then mark and acknowledge their tasks."""
         ...
 
     @abstractmethod
-    async def submit_retry(
-        self, task: dict[str, Any], error: Exception,
+    async def submit_retries(
+        self, failures: list[tuple[dict[str, Any], Exception]],
     ) -> None:
-        """Record a failed attempt and arrange the task's next delivery."""
+        """Record failed attempts and arrange their next delivery."""
         ...
 
     @abstractmethod

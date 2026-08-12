@@ -90,37 +90,42 @@ class RedisStreamsWorkQueue(WorkQueue):
         while await self._client.scard(self._outstanding_key):
             await asyncio.sleep(self._join_poll_seconds)
 
-    async def submit_result(
-        self, task: dict[str, Any], result: DedupEntry,
+    async def submit_results(
+        self, outcomes: list[tuple[dict[str, Any], DedupEntry]],
     ) -> None:
-        """Record the result before removing the task from the batch barrier."""
-        source_id = str(task["source_id"])
-        message_id = self._message_id(task)
-        self._dedup_store.register_batch([result])
-        await self._checkpoint.mark_completed_batch([source_id])
+        """Record results, then remove their tasks from the batch barrier."""
+        if not outcomes:
+            return
+        self._dedup_store.register_batch([result for _, result in outcomes])
+        await self._checkpoint.mark_completed_batch(
+            [str(task["source_id"]) for task, _ in outcomes],
+        )
         async with self._client.pipeline(transaction=True) as pipeline:
-            pipeline.srem(self._outstanding_key, source_id)
-            pipeline.xack(self._stream, self._group, message_id)
+            for task, _ in outcomes:
+                pipeline.srem(self._outstanding_key, str(task["source_id"]))
+                pipeline.xack(self._stream, self._group, self._message_id(task))
             await pipeline.execute()
 
-    async def submit_retry(
-        self, task: dict[str, Any], error: Exception,
+    async def submit_retries(
+        self, failures: list[tuple[dict[str, Any], Exception]],
     ) -> None:
-        """Requeue a failed task without releasing the batch barrier."""
-        source_id = str(task["source_id"])
-        recipe_card_hash = str(task["recipe_card_hash"])
-        message_id = self._message_id(task)
-        retry_task = self._payload(task)
-        retry_task["last_error"] = str(error)
-
-        await self._checkpoint.mark_pending(source_id)
-        await self._checkpoint.mark_in_flight(source_id, recipe_card_hash)
-        async with self._client.pipeline(transaction=True) as pipeline:
-            pipeline.xadd(
-                self._stream,
-                {"payload": json.dumps(retry_task, ensure_ascii=False)},
+        """Requeue failed tasks without releasing the batch barrier."""
+        if not failures:
+            return
+        for task, _ in failures:
+            await self._checkpoint.mark_pending(str(task["source_id"]))
+            await self._checkpoint.mark_in_flight(
+                str(task["source_id"]), str(task["recipe_card_hash"]),
             )
-            pipeline.xack(self._stream, self._group, message_id)
+        async with self._client.pipeline(transaction=True) as pipeline:
+            for task, error in failures:
+                retry_task = self._payload(task)
+                retry_task["last_error"] = str(error)
+                pipeline.xadd(
+                    self._stream,
+                    {"payload": json.dumps(retry_task, ensure_ascii=False)},
+                )
+                pipeline.xack(self._stream, self._group, self._message_id(task))
             await pipeline.execute()
 
     async def reclaim_stale(self) -> int:
