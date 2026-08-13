@@ -2,12 +2,12 @@
 
 One entry point, two roles:
 
-* ``--role orchestrator`` — discover, deduplicate, enqueue batches, wait for
-  each batch to drain through the queue.
-* ``--role worker`` — dequeue tasks, label via Ollama, submit results back.
+* ``--role orchestrator`` — discover, deduplicate, enqueue batches, and drain
+  their results back through the result stream. Owns dedup/checkpoint state.
+* ``--role worker`` — dequeue tasks, label via Ollama, publish results back.
+  Stateless: only touches Redis + Ollama, never dedup/checkpoint.
 
-Both roles share the same dedup/checkpoint stores and Redis stream, so run
-one orchestrator and any number of workers (each with a distinct
+Run one orchestrator and any number of workers (each with a distinct
 ``--consumer`` name).
 """
 
@@ -71,19 +71,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def _build_queue(
-    dedup_store: SimHashDedupStore,
-    checkpoint: FileCheckpointStore,
     *,
     redis_url: str,
     stream: str,
     group: str,
     consumer: str,
 ) -> tuple[Redis, RedisStreamsWorkQueue]:
+    """Create the Redis client and the transport queue (no stores — pure transport)."""
     client = Redis.from_url(redis_url)
     queue = RedisStreamsWorkQueue(
         client,
-        dedup_store=dedup_store,
-        checkpoint=checkpoint,
         consumer=consumer,
         stream=stream,
         group=group,
@@ -131,17 +128,17 @@ async def run_default(
     )
 
     source_dir = Path(base_dir).expanduser().resolve()
-    checkpoint = FileCheckpointStore(output_dir / "item_checkpoint.json")
-    dedup_store = SimHashDedupStore(
-        DEFAULT_DEDUP_DB.resolve(), threshold=threshold, checkpoint=checkpoint,
-    )
     client, queue = _build_queue(
-        dedup_store, checkpoint,
         redis_url=redis_url, stream=stream, group=group, consumer=consumer,
     )
+    dedup_store: SimHashDedupStore | None = None
 
     try:
         if role == "orchestrator":
+            checkpoint = FileCheckpointStore(output_dir / "item_checkpoint.json")
+            dedup_store = SimHashDedupStore(
+                DEFAULT_DEDUP_DB.resolve(), threshold=threshold, checkpoint=checkpoint,
+            )
             resolver = FileSystemURIResolver(base_dir=source_dir)
             sampler = Sampler(resolver, dedup_store, checkpoint, batch_size=batch_size)
             orchestrator = DistributedProductionOrchestrator(
@@ -170,7 +167,8 @@ async def run_default(
         await worker.run(count=count)
         return None
     finally:
-        dedup_store._db.close()
+        if dedup_store is not None:
+            dedup_store._db.close()
         await client.aclose()
 
 
