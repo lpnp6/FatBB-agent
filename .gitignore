@@ -41,3 +41,4 @@ configs/
 .claude/
 .env.orchestrator
 .env.worker
+.env.worker2

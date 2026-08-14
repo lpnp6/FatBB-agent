@@ -36,16 +36,22 @@ class Worker:
         self._repair = repair
 
     async def run(self, *, count: int = 1) -> None:
-        """Block in a dequeue → label → publish loop."""
+        """Block in a dequeue → label → publish loop, publishing as tasks land."""
         await self._queue.load()
         while True:
             tasks = await self._queue.dequeue(count)
             if not tasks:
                 continue
-            results = await asyncio.gather(
-                *(self._process_one(task) for task in tasks),
-            )
-            await self._queue.publish_results(list(zip(tasks, results)))
+            for coro in asyncio.as_completed(self._process_and_pair(t) for t in tasks):
+                task, result = await coro
+                await self._queue.publish_results([(task, result)])
+
+    async def _process_and_pair(
+        self, task: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Label one task and return it alongside its result so publish_results
+        can ack the correct ``_message_id``."""
+        return task, await self._process_one(task)
 
     async def _process_one(self, task: dict[str, Any]) -> dict[str, Any]:
         source_id = str(task["source_id"])
