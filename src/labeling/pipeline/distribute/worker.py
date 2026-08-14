@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -41,10 +42,10 @@ class Worker:
             tasks = await self._queue.dequeue(count)
             if not tasks:
                 continue
-            results: list[tuple[dict[str, Any], dict[str, Any]]] = []
-            for task in tasks:
-                results.append((task, await self._process_one(task)))
-            await self._queue.publish_results(results)
+            results = await asyncio.gather(
+                *(self._process_one(task) for task in tasks),
+            )
+            await self._queue.publish_results(list(zip(tasks, results)))
 
     async def _process_one(self, task: dict[str, Any]) -> dict[str, Any]:
         source_id = str(task["source_id"])
