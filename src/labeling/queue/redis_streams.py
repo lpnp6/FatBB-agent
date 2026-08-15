@@ -156,6 +156,33 @@ class RedisStreamsWorkQueue(WorkQueue):
         )
         return len(messages)
 
+    async def discard_pending(self) -> int:
+        """Acknowledge and drop every pending task delivery left by dead workers.
+
+        Dead workers strand their in-flight tasks in the consumer group's
+        pending-entries list (PEL). The orchestrator re-enqueues every PENDING
+        checkpoint item on the next run, so these abandoned deliveries are stale
+        duplicates: ack them without re-publishing and with no idle-time
+        threshold, so they are reclaimed immediately and never processed twice.
+        """
+        total = 0
+        cursor = "0-0"
+        while True:
+            next_cursor, messages, deleted = await self._client.xautoclaim(
+                self._stream, self._group, self._consumer, 0, cursor, count=100,
+            )
+            if not messages:
+                break
+            ids = [message_id for message_id, _ in messages]
+            if deleted:
+                ids.extend(deleted)
+            await self._client.xack(self._stream, self._group, *ids)
+            total += len(messages)
+            if next_cursor in (b"0-0", "0-0"):
+                break
+            cursor = next_cursor
+        return total
+
     async def reclaim_stale_results(self) -> int:
         response = await self._client.xautoclaim(
             self._results_stream,

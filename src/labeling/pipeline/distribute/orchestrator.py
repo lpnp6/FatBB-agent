@@ -50,6 +50,12 @@ class DistributedProductionOrchestrator(Orchestrator):
         # Reset items left IN_FLIGHT by a previous crash (same-run recovery).
         self._dedup_store.expire_stale(timeout_minutes=0)
         await self._checkpoint.expire_stale()
+        # Reclaim tasks stranded by dead workers: ack them without re-publishing
+        # so the sampler re-enqueues them fresh from the checkpoint immediately,
+        # instead of waiting out the 15-minute idle threshold.
+        discarded = await self._task_queue.discard_pending()
+        if discarded:
+            logger.info("Discarded %d abandoned task deliveries", discarded)
 
         scanned = 0
         queued = 0

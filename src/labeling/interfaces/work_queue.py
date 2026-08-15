@@ -69,6 +69,18 @@ class WorkQueue(ABC):
         ...
 
     @abstractmethod
+    async def discard_pending(self) -> int:
+        """Acknowledge and drop abandoned task deliveries.
+
+        Dead workers strand their in-flight tasks in the consumer group's
+        pending-entries list. The orchestrator re-enqueues every PENDING
+        checkpoint item on the next run, so these abandoned deliveries are
+        stale duplicates — discard them (ack without re-publish) so they are
+        never processed twice. Returns the number discarded.
+        """
+        ...
+
+    @abstractmethod
     async def reclaim_stale_results(self) -> int:
         """Return unfinished result deliveries to the result stream."""
         ...

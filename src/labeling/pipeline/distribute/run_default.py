@@ -115,6 +115,13 @@ def parse_args() -> argparse.Namespace:
         "--consumer",
         default=os.environ.get("CONSUMER_NAME", f"worker-{os.getpid()}"),
     )
+    parser.add_argument(
+        "--reclaim-after-ms", type=int,
+        default=_env_int("RECLAIM_AFTER_MS", 900_000),
+        help="Idle threshold (ms) before a worker reclaims a crashed worker's "
+             "task delivery. Must exceed the longest task latency so a slow-but-"
+             "alive worker is not stolen from.",
+    )
     return parser.parse_args()
 
 
@@ -124,6 +131,7 @@ def _build_queue(
     stream: str,
     group: str,
     consumer: str,
+    reclaim_after_ms: int,
 ) -> tuple[Redis, RedisStreamsWorkQueue]:
     """Create the Redis client and the transport queue (no stores — pure transport)."""
     client = Redis.from_url(redis_url)
@@ -132,6 +140,7 @@ def _build_queue(
         consumer=consumer,
         stream=stream,
         group=group,
+        reclaim_after_ms=reclaim_after_ms,
     )
     return client, queue
 
@@ -156,6 +165,7 @@ async def run_default(
     stream: str,
     group: str,
     consumer: str,
+    reclaim_after_ms: int,
 ) -> dict[str, Any] | None:
     """Assemble and run one role of the distributed labeling pipeline."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -179,6 +189,7 @@ async def run_default(
     source_dir = Path(base_dir).expanduser().resolve()
     client, queue = _build_queue(
         redis_url=redis_url, stream=stream, group=group, consumer=consumer,
+        reclaim_after_ms=reclaim_after_ms,
     )
     dedup_store: SimHashDedupStore | None = None
 
@@ -243,6 +254,7 @@ def main() -> None:
         stream=args.stream,
         group=args.group,
         consumer=args.consumer,
+        reclaim_after_ms=args.reclaim_after_ms,
     ))
     if result is not None:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
