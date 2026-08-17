@@ -45,6 +45,12 @@ def _is_stub_name(name: str) -> bool:
     return name == slug(name)
 
 
+def _node_id(label: str, name: str) -> str:
+    """Label-namespaced canonical id (``Dish:kung-pao-chicken``) so distinct
+    node labels can share a slug without colliding on the unique ``id``."""
+    return f"{label}:{slug(name)}"
+
+
 def _merge_properties(existing: dict, incoming: dict) -> dict:
     """List fields union; scalar fields keep the existing value unless it is None."""
     merged = dict(existing)
@@ -54,6 +60,14 @@ def _merge_properties(existing: dict, incoming: dict) -> dict:
             merged[key] = value
         elif isinstance(current, list) and isinstance(value, list):
             merged[key] = list(dict.fromkeys((*current, *value)))
+    return merged
+
+
+def _merge_provenance(existing: dict, incoming: dict) -> dict:
+    """Merge per-property provenance maps, keeping every ``source_id → value``."""
+    merged = {key: dict(sources) for key, sources in existing.items()}
+    for key, sources in incoming.items():
+        merged.setdefault(key, {}).update(sources)
     return merged
 
 
@@ -70,6 +84,7 @@ def _merge_nodes(canonical: GraphNode, candidate: GraphNode) -> GraphNode:
         name=name,
         aliases=tuple(dict.fromkeys(names)),
         properties=_merge_properties(canonical.properties, candidate.properties),
+        provenance=_merge_provenance(canonical.provenance, candidate.provenance),
         source=canonical.source or candidate.source,
     )
 
@@ -126,18 +141,22 @@ class GraphIndexer(Indexer):
     def _build_nodes(self, payload: dict, source: SourceRef) -> list[GraphNode]:
         nodes: list[GraphNode] = []
         for label, spec in self._schema.get("nodes", {}).items():
-            for node_id, item in self._resolve_nodes(payload, spec):
+            for node_id, item in self._resolve_nodes(payload, spec, label):
                 aliases = item.get(spec["aliases"]) if "aliases" in spec else None
+                properties = self._properties(item, spec.get("properties", []))
                 nodes.append(GraphNode(
                     node_id, label, item[spec["name"]],
                     tuple(aliases) if aliases else (),
-                    self._properties(item, spec.get("properties", [])),
+                    properties,
                     source,
+                    self._provenance(properties, source),
                 ))
         return nodes
 
-    def _resolve_nodes(self, payload: dict, spec: dict) -> list[tuple[str, dict]]:
-        """Yield ``(slug_id, item)`` for every item a node spec's source resolves to."""
+    def _resolve_nodes(
+        self, payload: dict, spec: dict, label: str,
+    ) -> list[tuple[str, dict]]:
+        """Yield ``(namespaced_id, item)`` for every item a node spec resolves to."""
         source = _read(payload, spec["source"])
         if source is None:
             return []
@@ -145,16 +164,18 @@ class GraphIndexer(Indexer):
         resolved: list[tuple[str, dict]] = []
         for item in items:
             if isinstance(item, dict) and item.get(spec["name"]):
-                resolved.append((slug(item[spec["name"]]), item))
+                resolved.append((_node_id(label, item[spec["name"]]), item))
         return resolved
 
     def _object_edges(self, payload: dict, spec: dict, source: SourceRef) -> list[GraphEdge]:
         """Emit edges between two node specs (e.g. ``Dish`` → each ``Ingredient``)."""
         from_spec = self._schema["nodes"][spec["from_node"]]
         to_spec = self._schema["nodes"][spec["to_node"]]
-        from_ids = [node_id for node_id, _ in self._resolve_nodes(payload, from_spec)]
+        from_ids = [
+            node_id for node_id, _ in self._resolve_nodes(payload, from_spec, spec["from_node"])
+        ]
         edges: list[GraphEdge] = []
-        for node_id, item in self._resolve_nodes(payload, to_spec):
+        for node_id, item in self._resolve_nodes(payload, to_spec, spec["to_node"]):
             for from_id in from_ids:
                 edges.append(GraphEdge(
                     from_id, node_id, spec["relation"],
@@ -180,7 +201,8 @@ class GraphIndexer(Indexer):
             to_ref = row.get(spec["to_field"])
             if relation is None or not from_ref or not to_ref:
                 continue
-            from_id, to_id = slug(from_ref), slug(to_ref)
+            from_id = _node_id(spec["label"], from_ref)
+            to_id = _node_id(spec["label"], to_ref)
             nodes.append(GraphNode(from_id, spec["label"], from_ref))
             nodes.append(GraphNode(to_id, spec["label"], to_ref))
             edges.append(GraphEdge(
@@ -193,6 +215,14 @@ class GraphIndexer(Indexer):
     @staticmethod
     def _properties(item: dict, fields: list[str]) -> dict:
         return {field: item[field] for field in fields if item.get(field) is not None}
+
+    @staticmethod
+    def _provenance(properties: dict, source: SourceRef | None) -> dict:
+        """Tag each property value with the id of the source that contributed it."""
+        if not properties:
+            return {}
+        source_id = source.document_id if source is not None else None
+        return {key: {source_id: value} for key, value in properties.items()}
 
     def _resolve_and_upsert(self, candidates: list[GraphNode], edges: list[GraphEdge]) -> None:
         existing = self._store.resolve_entities(candidates)

@@ -43,8 +43,9 @@ def _assert_rel_type(relation: str) -> None:
 def _node_params(node: GraphNode) -> dict:
     """Flatten a ``GraphNode`` into Neo4j node properties.
 
-    ``id``/``label``/``name``/``aliases``/``source`` are reserved; domain
-    ``properties`` must not collide with them (the schema config guarantees this).
+    ``id``/``label``/``name``/``aliases``/``source``/``provenance`` are reserved;
+    domain ``properties`` must not collide with them (the schema config
+    guarantees this).
     """
     params = {
         "id": node.id,
@@ -55,6 +56,8 @@ def _node_params(node: GraphNode) -> dict:
     params.update(node.properties)
     if node.source is not None:
         params["source"] = asdict(node.source)
+    if node.provenance:
+        params["provenance"] = node.provenance
     return params
 
 
@@ -66,10 +69,11 @@ def _node_from(props: dict) -> GraphNode:
     aliases = tuple(props.pop("aliases", ()))
     source_raw = props.pop("source", None)
     props.pop("embedding", None)  # reserved; read separately for vector matching
+    provenance = props.pop("provenance", None) or {}
     source = SourceRef(**source_raw) if source_raw else None
     return GraphNode(
         id=node_id, label=label, name=name, aliases=aliases,
-        properties=props, source=source,
+        properties=props, source=source, provenance=provenance,
     )
 
 
@@ -84,23 +88,26 @@ def _resolve_matches(
     candidates: list[GraphNode], matched: list[GraphNode],
 ) -> list[GraphNode | None]:
     """Resolve each candidate to a canonical node: exact id first, then name,
-    then alias (case-insensitive) — mirroring the in-memory store's semantics."""
+    then alias (case-insensitive) — constrained to the same ``label`` so a
+    Dish and an Ingredient sharing a name never cross-resolve."""
     by_id = {node.id: node for node in matched}
-    name_alias: dict[str, GraphNode] = {}
+    name_alias: dict[str, dict[str, GraphNode]] = {}
     for node in matched:
-        name_alias[node.name.lower()] = node
+        name_alias.setdefault(node.name.lower(), {})[node.label] = node
         for alias in node.aliases:
-            name_alias[alias.lower()] = node
+            name_alias.setdefault(alias.lower(), {})[node.label] = node
     resolved: list[GraphNode | None] = []
     for candidate in candidates:
         node = by_id.get(candidate.id)
+        if node is not None and node.label != candidate.label:
+            node = None
         if node is None:
-            node = name_alias.get(candidate.name.lower())
-            if node is None:
-                for alias in candidate.aliases:
-                    node = name_alias.get(alias.lower())
-                    if node is not None:
-                        break
+            node = name_alias.get(candidate.name.lower(), {}).get(candidate.label)
+        if node is None:
+            for alias in candidate.aliases:
+                node = name_alias.get(alias.lower(), {}).get(candidate.label)
+                if node is not None:
+                    break
         resolved.append(node)
     return resolved
 

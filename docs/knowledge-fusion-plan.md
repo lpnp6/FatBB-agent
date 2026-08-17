@@ -5,6 +5,8 @@ knowledge-fusion practice. Goals: **higher recall** (synonyms/typos merge),
 **auditability** (conflicts are not silently dropped), **no over-merging**
 (distinct same-named entities are not fused).
 
+**Status**: stages 1–3 implemented (see rollout order below).
+
 ## Current state
 
 - **Entity resolution**: `GraphIndexer._resolve_and_upsert` →
@@ -80,11 +82,14 @@ Replace `_merge_properties`' scalar first-wins with "multi-value + provenance".
 
 ## Rollout order (by ROI)
 
-1. **Label constraint** (stage 1) — one line; removes a definite over-merge class.
-2. **Conflict-preserving provenance** (stage 3) — pure data modeling, highest
-   real value, and it paves the way for truth discovery.
-3. **Embedding candidate classification** (stage 2) — recall gain;
-   Ingredient first, Dish later.
+1. **Label constraint** (stage 1) — ✅ done: ids are label-namespaced
+   (`Dish:kung-pao-chicken`) and matching is label-scoped.
+2. **Conflict-preserving provenance** (stage 3) — ✅ done: parallel provenance
+   map (`{field: {source_id: value}}`) keeps every value; scalar first-wins now
+   only picks the display value, the disagreement stays auditable.
+3. **Embedding candidate classification** (stage 2) — ✅ done: Neo4j HNSW
+   vector index; the borderline LLM re-judge and character-level typo fallback
+   remain deferred.
 
 ## Non-goals (YAGNI)
 
