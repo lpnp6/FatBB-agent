@@ -20,7 +20,13 @@ from ..interfaces.indexer import Indexer
 from ..interfaces.stores import GraphStore
 from ..models.common import SourceRef
 from ..models.document import Document
-from ..models.graph import GraphEdge, GraphNode, slug
+from ..models.graph import (
+    GraphEdge,
+    GraphNode,
+    merge_properties,
+    merge_provenance,
+    slug,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,26 +57,6 @@ def _node_id(label: str, name: str) -> str:
     return f"{label}:{slug(name)}"
 
 
-def _merge_properties(existing: dict, incoming: dict) -> dict:
-    """List fields union; scalar fields keep the existing value unless it is None."""
-    merged = dict(existing)
-    for key, value in incoming.items():
-        current = merged.get(key)
-        if current is None:
-            merged[key] = value
-        elif isinstance(current, list) and isinstance(value, list):
-            merged[key] = list(dict.fromkeys((*current, *value)))
-    return merged
-
-
-def _merge_provenance(existing: dict, incoming: dict) -> dict:
-    """Merge per-property provenance maps, keeping every ``source_id → value``."""
-    merged = {key: dict(sources) for key, sources in existing.items()}
-    for key, sources in incoming.items():
-        merged.setdefault(key, {}).update(sources)
-    return merged
-
-
 def _merge_nodes(canonical: GraphNode, candidate: GraphNode) -> GraphNode:
     """Fold ``candidate`` into ``canonical``, upgrading stub names and uniting aliases."""
     name = candidate.name if _is_stub_name(canonical.name) else canonical.name
@@ -83,8 +69,8 @@ def _merge_nodes(canonical: GraphNode, candidate: GraphNode) -> GraphNode:
         label=canonical.label,
         name=name,
         aliases=tuple(dict.fromkeys(names)),
-        properties=_merge_properties(canonical.properties, candidate.properties),
-        provenance=_merge_provenance(canonical.provenance, candidate.provenance),
+        properties=merge_properties(canonical.properties, candidate.properties),
+        provenance=merge_provenance(canonical.provenance, candidate.provenance),
         source=canonical.source or candidate.source,
     )
 
@@ -176,11 +162,13 @@ class GraphIndexer(Indexer):
         ]
         edges: list[GraphEdge] = []
         for node_id, item in self._resolve_nodes(payload, to_spec, spec["to_node"]):
+            properties = self._properties(item, spec.get("properties", []))
             for from_id in from_ids:
                 edges.append(GraphEdge(
                     from_id, node_id, spec["relation"],
-                    self._properties(item, spec.get("properties", [])),
+                    properties,
                     source,
+                    self._provenance(properties, source),
                 ))
         return edges
 
@@ -205,10 +193,12 @@ class GraphIndexer(Indexer):
             to_id = _node_id(spec["label"], to_ref)
             nodes.append(GraphNode(from_id, spec["label"], from_ref))
             nodes.append(GraphNode(to_id, spec["label"], to_ref))
+            properties = self._properties(row, spec.get("properties", []))
             edges.append(GraphEdge(
                 from_id, to_id, relation,
-                self._properties(row, spec.get("properties", [])),
+                properties,
                 source,
+                self._provenance(properties, source),
             ))
         return nodes, edges
 
@@ -237,7 +227,10 @@ class GraphIndexer(Indexer):
             else:
                 canonical[cid] = _merge_nodes(accumulated, candidate)
         resolved_edges = [
-            GraphEdge(remap[edge.source_id], remap[edge.target_id], edge.relation, edge.properties, edge.source)
+            GraphEdge(
+                remap[edge.source_id], remap[edge.target_id], edge.relation,
+                edge.properties, edge.source, edge.provenance,
+            )
             for edge in edges
         ]
         self._store.upsert_nodes(list(canonical.values()))

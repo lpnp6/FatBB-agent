@@ -10,7 +10,14 @@ from typing import TYPE_CHECKING
 from ...interfaces.client import EmbeddingClient
 from ...interfaces.stores import GraphStore
 from ...models.common import SourceRef
-from ...models.graph import GraphEdge, GraphNode, GraphPath, ScoredGraphNode
+from ...models.graph import (
+    GraphEdge,
+    GraphNode,
+    GraphPath,
+    ScoredGraphNode,
+    merge_properties,
+    merge_provenance,
+)
 
 if TYPE_CHECKING:
     from neo4j import Driver
@@ -81,6 +88,31 @@ def _edge_params(edge: GraphEdge) -> dict:
     params = dict(edge.properties)
     if edge.source is not None:
         params["source"] = asdict(edge.source)
+    if edge.provenance:
+        params["provenance"] = edge.provenance
+    return params
+
+
+_EDGE_RESERVED = ("source", "provenance")
+
+
+def _split_edge(props: dict) -> tuple[dict, dict | None, dict]:
+    """Split relationship props into ``(domain, source, provenance)``."""
+    domain = {k: v for k, v in props.items() if k not in _EDGE_RESERVED}
+    return domain, props.get("source"), props.get("provenance") or {}
+
+
+def _merge_edge(existing_props: dict, edge: GraphEdge) -> dict:
+    """Merge ``edge`` into an existing relationship's props, preserving provenance."""
+    domain, source, provenance = _split_edge(existing_props)
+    params = merge_properties(domain, edge.properties)
+    if source is not None:
+        params["source"] = source
+    elif edge.source is not None:
+        params["source"] = asdict(edge.source)
+    merged_provenance = merge_provenance(provenance, edge.provenance)
+    if merged_provenance:
+        params["provenance"] = merged_provenance
     return params
 
 
@@ -216,21 +248,38 @@ class Neo4jGraphStore(GraphStore):
     def upsert_edges(self, edges) -> None:
         if not edges:
             return
-        groups: dict[str, list[dict]] = {}
+        edges = list(edges)
+        groups: dict[str, list[GraphEdge]] = {}
         for edge in edges:
-            groups.setdefault(edge.relation, []).append({
-                "source_id": edge.source_id,
-                "target_id": edge.target_id,
-                "props": _edge_params(edge),
-            })
+            groups.setdefault(edge.relation, []).append(edge)
         with self._driver.session() as session:
             for relation, batch in groups.items():
                 _assert_rel_type(relation)
+                keys = [
+                    {"source_id": edge.source_id, "target_id": edge.target_id}
+                    for edge in batch
+                ]
+                existing: dict[tuple[str, str], dict] = {}
+                for record in session.run(
+                    f"UNWIND $keys AS k "
+                    f"MATCH (a:Entity {{id: k.source_id}})-[r:{relation}]->(b:Entity {{id: k.target_id}}) "
+                    f"RETURN k.source_id AS source_id, k.target_id AS target_id, properties(r) AS props",
+                    keys=keys,
+                ):
+                    existing[(record["source_id"], record["target_id"])] = dict(record["props"])
+                merged: dict[tuple[str, str], dict] = {}
+                for edge in batch:
+                    key = (edge.source_id, edge.target_id)
+                    base = merged.get(key, existing.get(key))
+                    merged[key] = _merge_edge(base, edge) if base is not None else _edge_params(edge)
                 session.run(
                     f"UNWIND $edges AS e "
                     f"MATCH (a:Entity {{id: e.source_id}}), (b:Entity {{id: e.target_id}}) "
-                    f"MERGE (a)-[r:{relation}]->(b) SET r += e.props",
-                    edges=batch,
+                    f"MERGE (a)-[r:{relation}]->(b) SET r = e.props",
+                    edges=[
+                        {"source_id": source_id, "target_id": target_id, "props": props}
+                        for (source_id, target_id), props in merged.items()
+                    ],
                 )
 
     def _embedding_fallback(
