@@ -42,3 +42,4 @@ configs/
 .env.orchestrator
 .env.worker
 .env.worker2
+.env.graphrag

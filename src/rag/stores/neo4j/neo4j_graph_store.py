@@ -164,6 +164,7 @@ class Neo4jGraphStore(GraphStore):
         password: str,
         embedder: EmbeddingClient | None = None,
         *,
+        database: str | None = None,
         embed_threshold: float = 0.85,
         embed_labels: tuple[str, ...] = ("Ingredient", "Dish"),
         embed_dimensions: int = 768,
@@ -173,6 +174,7 @@ class Neo4jGraphStore(GraphStore):
         self._user = user
         self._password = password
         self._driver = _driver(uri, user, password)
+        self._database = database
         self._embedder = embedder
         self._embed_threshold = embed_threshold
         self._embed_labels = embed_labels
@@ -181,8 +183,12 @@ class Neo4jGraphStore(GraphStore):
         self._embed_dimensions = embed_dimensions
         self._embed_top_k = embed_top_k
 
+    def _session(self):
+        """Open a session on the configured database (Aura requires the name)."""
+        return self._driver.session(database=self._database)
+
     def ensure_constraints(self) -> None:
-        with self._driver.session() as session:
+        with self._session() as session:
             session.run(
                 "CREATE CONSTRAINT entity_id IF NOT EXISTS "
                 "FOR (e:Entity) REQUIRE e.id IS UNIQUE"
@@ -199,9 +205,9 @@ class Neo4jGraphStore(GraphStore):
             "FOR (e:Entity) ON (e.embedding) "
             "OPTIONS {indexConfig: {`vector.dimensions`: "
             f"{self._embed_dimensions}, "
-            "`vector.similarityFunction`: 'cosine'}}"
+            "`vector.similarity_function`: 'cosine'}}"
         )
-        with self._driver.session() as session:
+        with self._session() as session:
             session.run(query)
             session.run("CALL db.awaitIndexes()")
 
@@ -222,7 +228,7 @@ class Neo4jGraphStore(GraphStore):
             "   OR ANY(x IN coalesce(e.aliases, []) WHERE toLower(x) IN $names) "
             "RETURN e"
         )
-        with self._driver.session() as session:
+        with self._session() as session:
             matched = [_node_from(dict(r["e"])) for r in session.run(query, ids=ids, names=list(names))]
         resolved = _resolve_matches(candidates, matched)
         self._embedding_fallback(candidates, resolved)
@@ -239,7 +245,7 @@ class Neo4jGraphStore(GraphStore):
                 vectors = self._embedder.batch_embedding([nodes[i].name for i in embed_idx])
                 for i, vector in zip(embed_idx, vectors):
                     params[i]["embedding"] = vector
-        with self._driver.session() as session:
+        with self._session() as session:
             session.run(
                 "UNWIND $nodes AS n MERGE (e:Entity {id: n.id}) SET e = n",
                 nodes=params,
@@ -252,7 +258,7 @@ class Neo4jGraphStore(GraphStore):
         groups: dict[str, list[GraphEdge]] = {}
         for edge in edges:
             groups.setdefault(edge.relation, []).append(edge)
-        with self._driver.session() as session:
+        with self._session() as session:
             for relation, batch in groups.items():
                 _assert_rel_type(relation)
                 keys = [
@@ -321,7 +327,7 @@ class Neo4jGraphStore(GraphStore):
             "WHERE node.label = $label AND score >= $threshold "
             "RETURN node ORDER BY score DESC LIMIT 1"
         )
-        with self._driver.session() as session:
+        with self._session() as session:
             record = session.run(
                 query,
                 top_k=self._embed_top_k,
@@ -336,7 +342,7 @@ class Neo4jGraphStore(GraphStore):
     def query_nodes(self, entity_ids) -> list[GraphNode]:
         if not entity_ids:
             return []
-        with self._driver.session() as session:
+        with self._session() as session:
             records = session.run(
                 "MATCH (e:Entity) WHERE e.id IN $ids RETURN e", ids=list(entity_ids),
             )
