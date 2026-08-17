@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _REL_TYPE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_VECTOR_INDEX = "entity_embedding"
 
 # Per-connection drivers shared across store instances (lazy, process-lifetime).
 _drivers: dict[tuple[str, str, str], "Driver"] = {}
@@ -201,7 +202,7 @@ class Neo4jGraphStore(GraphStore):
         the shared ``:Entity`` label, so matches are post-filtered by ``label``.
         """
         query = (
-            "CREATE VECTOR INDEX entity_embedding IF NOT EXISTS "
+            f"CREATE VECTOR INDEX {_VECTOR_INDEX} IF NOT EXISTS "
             "FOR (e:Entity) ON (e.embedding) "
             "OPTIONS {indexConfig: {`vector.dimensions`: "
             f"{self._embed_dimensions}, "
@@ -322,7 +323,7 @@ class Neo4jGraphStore(GraphStore):
         enough that the target label survives the filter.
         """
         query = (
-            "CALL db.index.vector.queryNodes('Entity', 'embedding', $top_k, $vector) "
+            f"CALL db.index.vector.queryNodes('{_VECTOR_INDEX}', $top_k, $vector) "
             "YIELD node, score "
             "WHERE node.label = $label AND score >= $threshold "
             "RETURN node ORDER BY score DESC LIMIT 1"
