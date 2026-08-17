@@ -49,8 +49,8 @@ synonym/spelling variants.
 - **Embedding input**: the entity `name` alone (single field). Write and
   query must feed the model the same text template (`embed_client.embed(name)`
   on both sides) or the vectors misalign.
-- **Retrieval**: brute-force cosine over candidate names at current scale
-  (thousands of nodes); add an ANN index past ~100k nodes.
+- **Retrieval**: Neo4j native HNSW vector index (`db.index.vector.queryNodes`)
+  over ``:Entity.embedding``, post-filtered by ``label``.
 - **Decision**: high threshold to preserve precision; the borderline band
   (e.g. cosine 0.75–0.9) is re-judged by an LLM.
 - **Synonym vs typo split**: embeddings recover **synonyms** (eggplant/
@@ -58,9 +58,11 @@ synonym/spelling variants.
   models are insensitive to character noise. Cover typos with a cheap
   character-level fallback (trigram Jaccard or Jaro-Winkler) before/after the
   embedding pass, not with the embedding itself.
-- **Scope**: enable for **Ingredient** first (synonyms/typos concentrate there;
-  ingredients are a flat namespace so over-merge risk is low). Keep **Dish**
-  lexical (homonym risk is high; embeddings would amplify over-merge).
+- **Scope**: enable for **Ingredient** and **Dish**. Ingredient is a flat
+  namespace (synonyms/typos concentrate there, over-merge risk low). Dish
+  recall covers variant spellings/translations but carries homonym risk
+  (near-name dishes may merge); if that shows up, raise the threshold or use
+  a dish-specific threshold.
 
 ### Stage 3: conflict-preserving provenance (property fusion)
 
@@ -86,7 +88,7 @@ Replace `_merge_properties`' scalar first-wins with "multi-value + provenance".
 
 ## Non-goals (YAGNI)
 
-- No vector database (brute-force cosine suffices at this scale).
+- No separate vector database (Neo4j's native HNSW vector index covers ANN).
 - No structural / cross-KG entity alignment (no such requirement).
 - No truth discovery yet (single source, no conflict data today; add
   provenance first, then truth discovery when the data warrants it).

@@ -7,6 +7,7 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
+from ...interfaces.client import EmbeddingClient
 from ...interfaces.stores import GraphStore
 from ...models.common import SourceRef
 from ...models.graph import GraphEdge, GraphNode, GraphPath, ScoredGraphNode
@@ -64,6 +65,7 @@ def _node_from(props: dict) -> GraphNode:
     name = props.pop("name")
     aliases = tuple(props.pop("aliases", ()))
     source_raw = props.pop("source", None)
+    props.pop("embedding", None)  # reserved; read separately for vector matching
     source = SourceRef(**source_raw) if source_raw else None
     return GraphNode(
         id=node_id, label=label, name=name, aliases=aliases,
@@ -109,12 +111,36 @@ class Neo4jGraphStore(GraphStore):
     ``neo4j`` is imported only on first driver use so tests and the build
     pipeline remain importable without the driver installed. Call
     :meth:`ensure_constraints` once at setup to enforce global id uniqueness.
+
+    An optional ``embedder`` enables embedding-based entity resolution: names
+    of ``embed_labels`` nodes are embedded at upsert and recovered via the
+    HNSW vector index when lexical matching misses. Call
+    :meth:`ensure_vector_index` once at setup (Neo4j ≥5.11).
     """
 
-    def __init__(self, uri: str, user: str, password: str):
+    def __init__(
+        self,
+        uri: str,
+        user: str,
+        password: str,
+        embedder: EmbeddingClient | None = None,
+        *,
+        embed_threshold: float = 0.85,
+        embed_labels: tuple[str, ...] = ("Ingredient", "Dish"),
+        embed_dimensions: int = 768,
+        embed_top_k: int = 20,
+    ):
         self._uri = uri
         self._user = user
         self._password = password
+        self._driver = _driver(uri, user, password)
+        self._embedder = embedder
+        self._embed_threshold = embed_threshold
+        self._embed_labels = embed_labels
+        if embed_dimensions <= 0:
+            raise ValueError("embed_dimensions must be positive")
+        self._embed_dimensions = embed_dimensions
+        self._embed_top_k = embed_top_k
 
     def ensure_constraints(self) -> None:
         with self._driver.session() as session:
@@ -123,11 +149,29 @@ class Neo4jGraphStore(GraphStore):
                 "FOR (e:Entity) REQUIRE e.id IS UNIQUE"
             )
 
+    def ensure_vector_index(self) -> None:
+        """Create the HNSW vector index over ``:Entity.embedding`` (Neo4j ≥5.11).
+
+        Call once at setup, after ``ensure_constraints``. The index is keyed on
+        the shared ``:Entity`` label, so matches are post-filtered by ``label``.
+        """
+        query = (
+            "CREATE VECTOR INDEX entity_embedding IF NOT EXISTS "
+            "FOR (e:Entity) ON (e.embedding) "
+            "OPTIONS {indexConfig: {`vector.dimensions`: "
+            f"{self._embed_dimensions}, "
+            "`vector.similarityFunction`: 'cosine'}}"
+        )
+        with self._driver.session() as session:
+            session.run(query)
+            session.run("CALL db.awaitIndexes()")
+
     # ---- build (GraphIndexer) ------------------------------------------
 
     def resolve_entities(self, candidates) -> list[GraphNode | None]:
         if not candidates:
             return []
+        candidates = list(candidates)
         ids = [candidate.id for candidate in candidates]
         names = {candidate.name.lower() for candidate in candidates}
         for candidate in candidates:
@@ -141,12 +185,21 @@ class Neo4jGraphStore(GraphStore):
         )
         with self._driver.session() as session:
             matched = [_node_from(dict(r["e"])) for r in session.run(query, ids=ids, names=list(names))]
-        return _resolve_matches(list(candidates), matched)
+        resolved = _resolve_matches(candidates, matched)
+        self._embedding_fallback(candidates, resolved)
+        return resolved
 
     def upsert_nodes(self, nodes) -> None:
         if not nodes:
             return
+        nodes = list(nodes)
         params = [_node_params(node) for node in nodes]
+        if self._embedder is not None:
+            embed_idx = [i for i, node in enumerate(nodes) if node.label in self._embed_labels]
+            if embed_idx:
+                vectors = self._embedder.batch_embedding([nodes[i].name for i in embed_idx])
+                for i, vector in zip(embed_idx, vectors):
+                    params[i]["embedding"] = vector
         with self._driver.session() as session:
             session.run(
                 "UNWIND $nodes AS n MERGE (e:Entity {id: n.id}) SET e = n",
@@ -172,6 +225,55 @@ class Neo4jGraphStore(GraphStore):
                     f"MERGE (a)-[r:{relation}]->(b) SET r += e.props",
                     edges=batch,
                 )
+
+    def _embedding_fallback(
+        self, candidates: list[GraphNode], resolved: list[GraphNode | None],
+    ) -> None:
+        """Recover synonyms for unresolved candidates via the HNSW vector index.
+
+        Restricted to labels in ``self._embed_labels``; other labels stay
+        lexical. See docs/knowledge-fusion-plan.md stage 2 — the borderline
+        LLM re-judge and character-level typo fallback are deferred.
+        """
+        pending = [
+            i for i, (candidate, node) in enumerate(zip(candidates, resolved))
+            if node is None and candidate.label in self._embed_labels
+        ]
+        if not pending:
+            return
+        embedder = self._embedder
+        if embedder is None:
+            return
+        query_vectors = embedder.batch_embedding(
+            [candidates[i].name for i in pending],
+        )
+        for index, vector in zip(pending, query_vectors):
+            match = self._vector_match(candidates[index].label, vector)
+            if match is not None:
+                resolved[index] = match
+
+    def _vector_match(self, label: str, vector: list[float]) -> GraphNode | None:
+        """Top same-label node above the threshold via ANN, or ``None``.
+
+        ``db.index.vector.queryNodes`` searches the shared ``:Entity`` index, so
+        the result is post-filtered by ``label``. ``embed_top_k`` must be large
+        enough that the target label survives the filter.
+        """
+        query = (
+            "CALL db.index.vector.queryNodes('Entity', 'embedding', $top_k, $vector) "
+            "YIELD node, score "
+            "WHERE node.label = $label AND score >= $threshold "
+            "RETURN node ORDER BY score DESC LIMIT 1"
+        )
+        with self._driver.session() as session:
+            record = session.run(
+                query,
+                top_k=self._embed_top_k,
+                vector=vector,
+                label=label,
+                threshold=self._embed_threshold,
+            ).single()
+        return _node_from(dict(record["node"])) if record else None
 
     # ---- retrieve (GraphRetriever) --------------------------------------
 
