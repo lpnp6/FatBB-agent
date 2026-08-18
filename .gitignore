@@ -43,3 +43,6 @@ configs/
 .env.worker
 .env.worker2
 .env.graphrag
+
+# Graph build checkpoint (resume-from file)
+build_checkpoint.json

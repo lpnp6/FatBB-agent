@@ -85,10 +85,32 @@ class GraphIndexer(Indexer):
     def upsert_documents(
         self, documents: Sequence[Document], *,
         on_progress: Callable[[str, int, int], None] | None = None,
+        checkpoint: Path | str | None = None,
     ) -> None:
-        """Map each document to nodes/edges, resolve, fuse, and upsert."""
+        """Map each document to nodes/edges, resolve, fuse, and upsert.
+
+        If *checkpoint* is given, completed ``document.id`` values are
+        persisted to that JSON file after each successful upsert; on resume
+        already-recorded documents are skipped. Upserts are idempotent
+        (``MERGE`` keyed on ``id``), so a document is only marked done once
+        its nodes *and* edges are written — a crash mid-document redoes that
+        whole document safely.
+        """
+        done: set[str] = set()
+        if checkpoint is not None:
+            checkpoint = Path(checkpoint)
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            if checkpoint.exists():
+                try:
+                    done = set(json.loads(checkpoint.read_text(encoding="utf-8")))
+                except (OSError, ValueError):
+                    logger.warning("Ignoring unreadable checkpoint at %s", checkpoint)
+            documents = [d for d in documents if d.id not in done]
         total = len(documents)
-        logger.info("Upserting documents into knowledge graph", extra={"document_count": total})
+        logger.info(
+            "Upserting documents into knowledge graph",
+            extra={"document_count": total, "resumed": len(done)},
+        )
         for idx, document in enumerate(
             tqdm(documents, desc="Indexing graph", unit="document", disable=on_progress is not None)
         ):
@@ -99,6 +121,11 @@ class GraphIndexer(Indexer):
                 continue
             nodes, edges = mapped
             self._resolve_and_upsert(nodes, edges)
+            if checkpoint is not None:
+                done.add(document.id)
+                checkpoint.write_text(
+                    json.dumps(sorted(done), ensure_ascii=False), encoding="utf-8",
+                )
         logger.info("Completed graph upsert", extra={"document_count": total})
 
     def delete_documents(self, document_ids: Sequence[str]) -> None:

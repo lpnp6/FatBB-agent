@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import json
 import logging
 import re
 from typing import TYPE_CHECKING
@@ -48,6 +49,25 @@ def _assert_rel_type(relation: str) -> None:
         raise ValueError(f"invalid relationship type: {relation!r}")
 
 
+def _storable(value: object) -> object:
+    """Coerce a value to a Neo4j-storable form (primitive or array of primitives).
+
+    Nested maps and non-primitive lists are JSON-encoded to strings.
+    """
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        if all(isinstance(v, (bool, int, float, str)) for v in value):
+            return list(value)
+        return json.dumps(list(value), ensure_ascii=False)
+    return value
+
+
+def _encode_properties(props: dict) -> dict:
+    """Map each property value through :func:`_storable`."""
+    return {key: _storable(value) for key, value in props.items()}
+
+
 def _node_params(node: GraphNode) -> dict:
     """Flatten a ``GraphNode`` into Neo4j node properties.
 
@@ -61,11 +81,11 @@ def _node_params(node: GraphNode) -> dict:
         "name": node.name,
         "aliases": list(node.aliases),
     }
-    params.update(node.properties)
+    params.update(_encode_properties(node.properties))
     if node.source is not None:
-        params["source"] = asdict(node.source)
+        params["source"] = json.dumps(asdict(node.source), ensure_ascii=False)
     if node.provenance:
-        params["provenance"] = node.provenance
+        params["provenance"] = json.dumps(node.provenance, ensure_ascii=False)
     return params
 
 
@@ -77,8 +97,9 @@ def _node_from(props: dict) -> GraphNode:
     aliases = tuple(props.pop("aliases", ()))
     source_raw = props.pop("source", None)
     props.pop("embedding", None)  # reserved; read separately for vector matching
-    provenance = props.pop("provenance", None) or {}
-    source = SourceRef(**source_raw) if source_raw else None
+    provenance_raw = props.pop("provenance", None)
+    source = SourceRef(**json.loads(source_raw)) if source_raw else None
+    provenance = json.loads(provenance_raw) if provenance_raw else {}
     return GraphNode(
         id=node_id, label=label, name=name, aliases=aliases,
         properties=props, source=source, provenance=provenance,
@@ -86,34 +107,40 @@ def _node_from(props: dict) -> GraphNode:
 
 
 def _edge_params(edge: GraphEdge) -> dict:
-    params = dict(edge.properties)
+    params = _encode_properties(edge.properties)
     if edge.source is not None:
-        params["source"] = asdict(edge.source)
+        params["source"] = json.dumps(asdict(edge.source), ensure_ascii=False)
     if edge.provenance:
-        params["provenance"] = edge.provenance
+        params["provenance"] = json.dumps(edge.provenance, ensure_ascii=False)
     return params
 
 
 _EDGE_RESERVED = ("source", "provenance")
 
 
-def _split_edge(props: dict) -> tuple[dict, dict | None, dict]:
-    """Split relationship props into ``(domain, source, provenance)``."""
+def _split_edge(props: dict) -> tuple[dict, str | None, dict]:
+    """Split relationship props into ``(domain, source_json, provenance)``.
+
+    ``source`` stays JSON-encoded (first-wins needs no decode); ``provenance``
+    is decoded for merging.
+    """
     domain = {k: v for k, v in props.items() if k not in _EDGE_RESERVED}
-    return domain, props.get("source"), props.get("provenance") or {}
+    provenance_raw = props.get("provenance")
+    provenance = json.loads(provenance_raw) if provenance_raw else {}
+    return domain, props.get("source"), provenance
 
 
 def _merge_edge(existing_props: dict, edge: GraphEdge) -> dict:
     """Merge ``edge`` into an existing relationship's props, preserving provenance."""
     domain, source, provenance = _split_edge(existing_props)
-    params = merge_properties(domain, edge.properties)
+    params = _encode_properties(merge_properties(domain, edge.properties))
     if source is not None:
         params["source"] = source
     elif edge.source is not None:
-        params["source"] = asdict(edge.source)
+        params["source"] = json.dumps(asdict(edge.source), ensure_ascii=False)
     merged_provenance = merge_provenance(provenance, edge.provenance)
     if merged_provenance:
-        params["provenance"] = merged_provenance
+        params["provenance"] = json.dumps(merged_provenance, ensure_ascii=False)
     return params
 
 
