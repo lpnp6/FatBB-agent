@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from ...interfaces.client import EmbeddingClient
 from ...interfaces.stores import GraphStore
+from ...utils.rrf import rrf
 from ...models.common import SourceRef
 from ...models.graph import (
     GraphEdge,
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _REL_TYPE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _VECTOR_INDEX = "entity_embedding"
+_FULLTEXT_INDEX = "entity_name"
 
 # Per-connection drivers shared across store instances (lazy, process-lifetime).
 _drivers: dict[tuple[str, str, str], "Driver"] = {}
@@ -177,7 +179,8 @@ class Neo4jGraphStore(GraphStore):
 
     ``neo4j`` is imported only on first driver use so tests and the build
     pipeline remain importable without the driver installed. Call
-    :meth:`ensure_constraints` once at setup to enforce global id uniqueness.
+    :meth:`ensure_constraints` once at setup to enforce global id uniqueness,
+    and :meth:`ensure_fulltext_index` for retrieval-time entity matching.
 
     An optional ``embedder`` enables embedding-based entity resolution: names
     of ``embed_labels`` nodes are embedded at upsert and recovered via the
@@ -197,6 +200,10 @@ class Neo4jGraphStore(GraphStore):
         embed_labels: tuple[str, ...] = ("Ingredient", "Dish"),
         embed_dimensions: int = 768,
         embed_top_k: int = 20,
+        symmetric_relations: tuple[str, ...] = (
+            "VARIANT_OF", "PAIRS_WITH", "COMPLEMENTS", "SUBSTITUTES", "MAKES",
+        ),
+        embed_retrieval_threshold: float = 0.5,
     ):
         self._uri = uri
         self._user = user
@@ -210,6 +217,8 @@ class Neo4jGraphStore(GraphStore):
             raise ValueError("embed_dimensions must be positive")
         self._embed_dimensions = embed_dimensions
         self._embed_top_k = embed_top_k
+        self._symmetric_relations = tuple(symmetric_relations)
+        self._embed_retrieval_threshold = embed_retrieval_threshold
 
     def _session(self):
         """Open a session on the configured database (Aura requires the name)."""
@@ -237,6 +246,20 @@ class Neo4jGraphStore(GraphStore):
         )
         with self._session() as session:
             session.run(query)
+            session.run("CALL db.awaitIndexes()")
+
+    def ensure_fulltext_index(self) -> None:
+        """Create the Lucene fulltext index over ``:Entity`` name/aliases.
+
+        Call once at setup, after ``ensure_constraints``. Serves
+        :meth:`match_entities` via ``db.index.fulltext.queryNodes``; ordinary
+        ``MATCH`` lookups do not use it.
+        """
+        with self._session() as session:
+            session.run(
+                f"CREATE FULLTEXT INDEX {_FULLTEXT_INDEX} IF NOT EXISTS "
+                "FOR (e:Entity) ON EACH [e.name, e.aliases]"
+            )
             session.run("CALL db.awaitIndexes()")
 
     # ---- build (GraphIndexer) ------------------------------------------
@@ -338,32 +361,39 @@ class Neo4jGraphStore(GraphStore):
             [candidates[i].name for i in pending],
         )
         for index, vector in zip(pending, query_vectors):
-            match = self._vector_match(candidates[index].label, vector)
-            if match is not None:
-                resolved[index] = match
+            hits = self._vector_matches(
+                candidates[index].label, vector, n=1, threshold=self._embed_threshold,
+            )
+            if hits:
+                resolved[index] = hits[0][0]
 
-    def _vector_match(self, label: str, vector: list[float]) -> GraphNode | None:
-        """Top same-label node above the threshold via ANN, or ``None``.
+    def _vector_matches(
+        self, label: str, vector: list[float], *, n: int, threshold: float,
+    ) -> list[tuple[GraphNode, float]]:
+        """Top ``n`` same-label nodes via ANN, score-descending, above threshold.
 
         ``db.index.vector.queryNodes`` searches the shared ``:Entity`` index, so
         the result is post-filtered by ``label``. ``embed_top_k`` must be large
-        enough that the target label survives the filter.
+        enough that the target label survives the filter before ``LIMIT n``.
         """
         query = (
             f"CALL db.index.vector.queryNodes('{_VECTOR_INDEX}', $top_k, $vector) "
             "YIELD node, score "
             "WHERE node.label = $label AND score >= $threshold "
-            "RETURN node ORDER BY score DESC LIMIT 1"
+            "RETURN node, score ORDER BY score DESC LIMIT $n"
         )
         with self._session() as session:
-            record = session.run(
-                query,
-                top_k=self._embed_top_k,
-                vector=vector,
-                label=label,
-                threshold=self._embed_threshold,
-            ).single()
-        return _node_from(dict(record["node"])) if record else None
+            return [
+                (_node_from(dict(record["node"])), record["score"])
+                for record in session.run(
+                    query,
+                    top_k=self._embed_top_k,
+                    vector=vector,
+                    label=label,
+                    threshold=threshold,
+                    n=n,
+                )
+            ]
 
     # ---- retrieve (GraphRetriever) --------------------------------------
 
@@ -377,8 +407,123 @@ class Neo4jGraphStore(GraphStore):
             return [_node_from(dict(r["e"])) for r in records]
 
     def match_entities(self, text, *, top_k) -> list[ScoredGraphNode]:
-        # ponytail: needs a fulltext index on name/aliases; part of GraphRetriever.
-        raise NotImplementedError("match_entities is deferred to GraphRetriever (P4)")
+        """Match free text to entities: RRF-fuse two channels — whole-term
+        fulltext on ``name``/``aliases``, and HNSW embedding over
+        ``embed_labels`` (gated by ``embed_retrieval_threshold``).
+
+        Fulltext (default Lucene analyzer) sees CJK as one token per run, so
+        Chinese queries only hit on an exact alias/name; the embedding channel
+        covers the rest. RRF merges the channels by rank position, so an
+        embedding hit can outrank a fulltext hit without normalizing the two
+        score scales; the embedding threshold still gates precision.
+        """
+        ranked: list[list[str]] = []
+        nodes: dict[str, GraphNode] = {}
+
+        fulltext_nodes = [
+            _node_from(dict(record["node"]))
+            for record in self._fulltext_entities(text, top_k * 3)
+        ]
+        if fulltext_nodes:
+            ranked.append([node.id for node in fulltext_nodes])
+            nodes.update({node.id: node for node in fulltext_nodes})
+
+        if self._embedder is not None:
+            vector = self._embedder.batch_embedding([text])[0]
+            for label in self._embed_labels:
+                label_hits = self._vector_matches(
+                    label, vector, n=top_k, threshold=self._embed_retrieval_threshold,
+                )
+                if label_hits:
+                    ranked.append([node.id for node, _ in label_hits])
+                    for node, _ in label_hits:
+                        nodes[node.id] = node
+
+        fused = rrf(ranked)
+        return [
+            ScoredGraphNode(nodes[node_id], fused[node_id])
+            for node_id in sorted(fused, key=fused.get, reverse=True)[:top_k]
+        ]
+
+    def _fulltext_entities(self, text: str, top_k: int) -> list[dict]:
+        """Lucene match on the name/aliases fulltext index.
+
+        ``\\w``-only terms dodge Lucene's reserved characters; whitespace-joined
+        terms are OR'd (Lucene default) for recall, ranked by relevance.
+        """
+        terms = re.findall(r"\w+", text)
+        if not terms:
+            return []
+        with self._session() as session:
+            return [
+                dict(record)
+                for record in session.run(
+                    f"CALL db.index.fulltext.queryNodes('{_FULLTEXT_INDEX}', $q, "
+                    "{limit: $top_k}) YIELD node, score RETURN node, score",
+                    q=" ".join(terms),
+                    top_k=top_k,
+                )
+            ]
 
     def query_paths(self, seeds, *, relation_types, max_hops, top_k) -> list[GraphPath]:
-        raise NotImplementedError("query_paths is deferred to GraphRetriever (P4)")
+        """One subgraph ``GraphPath`` per seed: distinct nodes and edges reachable
+        within ``max_hops``, merged from two traversals —
+
+        - ``relation_types`` (empty = all) outward/forward only, so hierarchical
+          relations (``CONTAINS``/``BELONGS_TO``) never fan backward through a
+          shared hub ingredient into every sibling dish;
+        - ``symmetric_relations`` undirected (stored either direction).
+
+        A neighborhood bag, not enumerated paths; the LLM gets the local graph
+        in one piece. ``max_hops`` is interpolated (variable-length pattern
+        bounds must be literals); callers validate it, but coerce+guard anyway.
+        # ponytail: forward-only misses "dishes CONTAINING X" reverse queries —
+        # those belong to BM25/vector or a dedicated reverse lookup.
+        """
+        if not seeds or max_hops <= 0 or top_k <= 0:
+            return []
+        max_hops = int(max_hops)
+        rels = list(relation_types)
+        symmetric = list(self._symmetric_relations)
+        collect = (
+            "WITH nodes(p) AS p_nodes, relationships(p) AS p_rels "
+            "UNWIND p_nodes AS node "
+            "WITH collect(DISTINCT node) AS ns, collect(p_rels) AS rel_groups "
+            "UNWIND rel_groups AS rels "
+            "UNWIND rels AS rel "
+            "WITH ns, rel "
+            "RETURN ns, collect(DISTINCT {{source_id: startNode(rel).id, "
+            "relation: type(rel), target_id: endNode(rel).id, props: properties(rel)}}) AS es"
+        )
+        forward = (
+            "MATCH p = (s:Entity)-[r*1..{max_hops}]->(n) "
+            "WHERE s.id = $seed AND ($rels = [] OR all(rr IN r WHERE type(rr) IN $rels)) "
+        )
+        undirected = (
+            "MATCH p = (s:Entity)-[r*1..{max_hops}]-(n) "
+            "WHERE s.id = $seed AND all(rr IN r WHERE type(rr) IN $symmetric) "
+        )
+        paths: list[GraphPath] = []
+        with self._session() as session:
+            for seed in seeds[:top_k]:
+                nodes: dict[str, GraphNode] = {}
+                edges: dict[tuple[str, str, str], GraphEdge] = {}
+                for template, params in (
+                    (forward, {"seed": seed, "rels": rels}),
+                    (undirected, {"seed": seed, "symmetric": symmetric}),
+                ):
+                    query = (template + collect).format(max_hops=max_hops)
+                    record = session.run(query, **params).single()  # type: ignore[arg-type]
+                    if record is None:
+                        continue
+                    for n in record["ns"]:
+                        node = _node_from(dict(n))
+                        nodes[node.id] = node
+                    for e in record["es"]:
+                        key = (e["source_id"], e["relation"], e["target_id"])
+                        edges[key] = GraphEdge(
+                            e["source_id"], e["target_id"], e["relation"], dict(e["props"]),
+                        )
+                if nodes:
+                    paths.append(GraphPath(tuple(nodes.values()), tuple(edges.values())))
+        return paths

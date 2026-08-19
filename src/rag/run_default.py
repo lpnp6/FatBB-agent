@@ -67,6 +67,7 @@ def run_default(
     )
     store = Neo4jGraphStore(uri, user, password, embedder, database=database)
     store.ensure_constraints()
+    store.ensure_fulltext_index()
     if embedder is not None:
         store.ensure_vector_index()
 
